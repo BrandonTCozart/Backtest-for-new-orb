@@ -16,6 +16,9 @@ public static class OptimizationEngine
         OptimizationConfig config, IReadOnlyList<SessionData> sessions,
         bool keepTrades = false)
     {
+        if (config.EsQuantity is < 1 or > 2 || config.MesQuantity is < 0 or > 20)
+            throw new ArgumentOutOfRangeException(nameof(config),
+                "Optimizer position caps: 1–2 ES; 0–20 MES.");
         var result = new OptimizationResult { Config = config };
         if (keepTrades) result.DetailedTrades = new List<SimulatedTrade>();
         decimal balance = 0m, maxBalance = 0m;

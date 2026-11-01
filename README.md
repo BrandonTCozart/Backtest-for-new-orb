@@ -9,7 +9,7 @@ Place one of these files in the project's local `data` folder:
 - `data/es_1m_3months.csv`
 - `data/es_1m_3months_INCOMPLETE.csv`
 
-If both exist, the newest modified file is selected. The file must use columns `timestamp_utc,contract,open,high,low,close,volume`. If you previously downloaded an incomplete file, only those available sessions are tested; skipped days are reported.
+If both exist, the complete-named file (`es_1m_3months.csv`) is preferred; otherwise the incomplete file is used. The file must use columns `timestamp_utc,contract,open,high,low,close,volume`. If you previously downloaded an incomplete file, only those available sessions are tested; skipped days are reported.
 
 ## Strategy
 

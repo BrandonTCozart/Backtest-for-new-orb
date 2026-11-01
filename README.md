@@ -1,61 +1,71 @@
-# Backtest-for-new-orb — ES P&L with $500 profit-lock ladder
+# ORB Configuration Optimizer — Visual Studio
 
-Open **`Backtest for new orb.slnx`** in Visual Studio and press the green **Start** button. The app reads an existing local ES 1-minute CSV and runs a historical backtest. It **does not download candles, connect to Topstep, require credentials, or submit orders**.
+Open **`Backtest for new orb.slnx`** and click the green **Play/Start** button. This performs a **recursive, exhaustive search of a deliberately bounded parameter grid** against your existing local ES 1-minute CSV.
 
-## Input
+It is **completely offline**: no Topstep API calls, no downloading, no user secrets needed, and **no live orders**. The live `Orb` repo is unchanged.
 
-Place one of these files in the project's local `data` folder:
+## Required input
 
-- `data/es_1m_3months.csv`
-- `data/es_1m_3months_INCOMPLETE.csv`
+Place **`data/es_1m_3months.csv`** in the project folder. If only **`data/es_1m_3months_INCOMPLETE.csv`** is available, that is accepted with a warning. The normal-named CSV is preferred when both exist.
 
-If both exist, the complete-named file (`es_1m_3months.csv`) is preferred; otherwise the incomplete file is used. The file must use columns `timestamp_utc,contract,open,high,low,close,volume`. If you previously downloaded an incomplete file, only those available sessions are tested; skipped days are reported.
+Expected header: `timestamp_utc,contract,open,high,low,close,volume`.
 
-## Strategy
+## What gets optimized
 
-This backtests the **first ES trade each trading day**, using the **unchanged** `Orb` strategy implementation copied to `Backtesting/OrbStrategy.cs`. It preserves the 9:30–9:45 AM Eastern opening range, long/short close-outside-range signal, 1 ES contract, original initial stop (75% of range with $600 estimated maximum risk and $500 fallback) and the original protective stop stages before the new target triggers. It excludes optional Stage 6 MES reversals. Any position still open at 4 PM Eastern is closed.
+The entry is still based on the original **9:30–9:45 AM ET opening range**, and the first trade is simulated with the original ORB stages, including FVG/reference-level stop logic.
 
-**New profit handling (gross unrealized dollars for one ES, $50 per point):**
+The program recursively evaluates **all 15,552 combinations** of the following choices:
 
-| Maximum favorable profit reached | New stop protects |
-| ---: | ---: |
-| Below $500 | Existing ORB stop rules |
-| $500 | $450 |
-| $700 | $650 |
-| $900 | $850 |
-| $1,100 | $1,050 |
-| And so on | $50 behind each $200 milestone |
+| Parameter | Tested values |
+| --- | --- |
+| Last eligible breakout signal close (ET) | 10:00, 10:30, 11:00 |
+| Opening range width, ES points | unrestricted, 6–25, 10–40 |
+| VWAP filter | off; direction confirmation; direction + 5-minute VWAP slope |
+| Extra breakout close distance past OR boundary | 0, 0.5, 1 ES point |
+| Breakout volume relative to prior 10 completed minutes | off, 1.25× |
+| Entry on retest of OR boundary after breakout | off; on (within five 1-minute candles) |
+| First trade size | **1 or 2 ES** |
+| Total initial-risk cap / fallback stop risk | $600/$500 or $500/$400 |
+| Original Stage 5 ES trailing distance | $150, $250, $350 |
+| Optional Stage 6 size after a losing stopped-out ES trade | **0, 5, 10 or 20 MES** |
 
-This is **not a fixed $500 take-profit exit**. After reaching +$500, the trade continues; it exits when its protective stop is hit or at session close. Existing stops are never loosened. Once the +$500 milestone is reached, the ladder replaces the normal later-stage stop logic. The thresholds and amounts are in `Backtesting/ProfitLockLadder.cs`.
+These combinations are explicitly **bounded**, not an attempt to search literally every real-valued stop setting. The original Stage 3/4 thresholds, Stage 5 activation threshold, and Stage 6 MES stop stages stay as in the `Orb` strategy. **This optimizer does not use or compare the $500/$450 profit-lock system** that was used by the preceding experiment.
 
-The backtest estimates **$10 round-trip cost per ES contract** (the same allowance used in the original stop-risk calculation). For example, if a stop fills at +$450, the estimated **net realized P&L is +$440**. This is a modeling assumption; actual commissions, fees and slippage can differ.
+When retest is enabled, the simulator first detects a qualifying breakout, then waits up to five bars for the opening-range boundary to be touched and for price to close outside again.
 
-## Results
+### Important MES limitation
 
-Visual Studio console output includes:
+**The CSV contains ES candles only.** A Stage 6 MES trade is simulated using the **ES price as a proxy** and the MES $5/point value, with a quantity up to **20 MES**. MES has the same tick size as ES but not necessarily the exact same prices, volume, spreads, or fills. Consequently the MES backtest is a *hypothetical proxy estimate*, **not** a verified MES historical replay. Any configuration whose P&L relies on Stage 6 needs genuine historical MES candles before considering live use.
 
-- **Total gross P&L, estimated costs and total net P&L** for the downloaded period
-- Number of completed trades, winning/losing trades, win rate, average net P&L/trade
-- Maximum drawdown calculated from *closed-trade cumulative equity* (not unrealized intratrade drawdown)
-- Number of trades that reached the +$500 milestone and average maximum favorable movement (MFE)
-- Separate long/short net P&L
+All trades include an estimated $10-per-contract cost from the existing `Orb` risk allowance. This may differ significantly from actual commissions and slippage, especially for MES. Risk caps are total position risk, not per-contract risk.
 
-The program writes these CSVs to your local `data` folder:
+## Ranking and protection against overfitting
 
-- `backtest_first_trade_500_lock_pnl.csv` — every trade's entry, exit, stop, gross, estimated fees, **net P&L**, cumulative net P&L, MFE, target milestone, and exit reason
-- `backtest_monthly_500_lock_pnl.csv` — monthly P&L and monthly cumulative net P&L
-- `backtest_skipped_days.csv` — sessions excluded due to missing or unusable minute data
+The optimizer divides eligible days **chronologically**, before calculating returns:
 
-All data CSVs are ignored by Git.
+- First 70% of complete-ORB days: **training**. Every combination is tested, and the most profitable training configuration is selected by **highest simulated net P&L**, subject to a minimum number of first ES trades. Drawdown and trade count are tie breakers.
+- Last 30%: untouched **holdout**. Only the top ten training configurations are evaluated on these days. **Holdout P&L is not used to pick the winner.**
 
-## Important limitations
+The program displays the **best training configuration**, its exact settings, total training net P&L, drawdown, trade count, and separate holdout performance. It also reports combined-period P&L strictly as descriptive context.
 
-**This is an approximation with 1-minute OHLC candles, not a tick-by-tick replay.** The live `Orb` worker updates stops from individual quotes and confirms orders with Topstep. This backtest instead uses the next candle's open for a simulated market entry, candle closes for the pre-$500 stage changes, and candle high/low to detect the new $500/$700/$900 milestones.
+**Thousands of strategies tested on only a few weeks of ES history create significant overfitting risk.** Even a good holdout result on such a short period is weak evidence of future profitability. Increase sample coverage and retest before using a candidate with real money.
 
-When the *previously active* protective stop and a favorable target are both touched inside one candle, the simulator conservatively assumes the **old stop happened first**. When a new ladder stop is raised and that same candle also touches the new stop, it assumes the **new stop was hit** and records the exit reason `ladder-stop-same-bar-assumed`. Intraminute price order is unknowable from OHLC alone. New ladder stops may trigger before the candle close in the model, unlike the prior stages. These assumptions can change both win rate and total P&L.
+## CSV output
 
-Other limits: fills at stop prices except when price gaps past an already-active stop (uses candle open); no real broker execution delays, commission variance, or slippage simulation; skip sessions with missing candles during an open trade; incomplete historical coverage and front-month roll selection are inherited from your downloaded data. A strategy that looks profitable in historical candles may not be profitable live.
+All reports go in your local `data` folder:
 
-**Development status:** Changes are committed to GitHub, but ChatGPT cannot access the CSV on your computer or execute the .NET project in your Visual Studio environment. The actual P&L figures will be computed when you press Start.
+- **`optimizer_all_configurations.csv`** — all 15,552 tested combinations with settings, training P&L, drawdown, number of trades, and eligibility.
+- **`optimizer_top10_holdout.csv`** — the top ten ranked on training results, with corresponding holdout results.
+- **`optimizer_best_trades.csv`** — first ES and any simulated MES trades for the best configuration, including per-trade and running net P&L; labels MES rows `MES_ES_PRICE_PROXY`.
+- **`optimizer_best_monthly_pnl.csv`** — monthly gross P&L, estimated costs, net P&L, cumulative net P&L.
+- **`optimizer_best_configuration.txt`** — human-readable winning parameters and training/holdout breakdown.
 
-The live `Orb` repository was not modified.
+Missing bars during an active trade cause it to be excluded. Missing entire dates in an incomplete source cannot be reconstructed.
+
+## One-minute backtest limitations
+
+Entry is assumed at the **next candle's open** after a qualifying signal. Original stop stages react to **candle closes** rather than to individual quote updates as the live worker does. An already-active stop is assumed to trigger first if the same minute also has a favorable wick; gap-through-stop exits use the candle opening price. These are simulation choices, not broker-confirmed fills. Trading costs are fixed estimates.
+
+The recursive grid search may run for an extended period on slower computers. Progress is printed every 250 configurations. Close the running program or use Visual Studio Stop to cancel. The program writes final reports when all configurations have been evaluated.
+
+**Development status:** These changes were committed to GitHub but have not been compiled or run with your private CSV in this environment.

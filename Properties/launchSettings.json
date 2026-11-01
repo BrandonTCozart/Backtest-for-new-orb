@@ -1,9 +1,9 @@
-﻿{
+{
   "$schema": "https://json.schemastore.org/launchsettings.json",
   "profiles": {
-    "Backtest_for_new_orb": {
+    "Download 3 Months ES CSV": {
       "commandName": "Project",
-      "dotnetRunMessages": true,
+      "commandLineArgs": "",
       "environmentVariables": {
         "DOTNET_ENVIRONMENT": "Development"
       }

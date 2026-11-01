@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/launchsettings.json",
   "profiles": {
-    "Download 3 Months ES CSV": {
+    "Backtest First ES ORB Trade": {
       "commandName": "Project",
       "commandLineArgs": "",
       "environmentVariables": {

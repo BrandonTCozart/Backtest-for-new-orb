@@ -15,12 +15,14 @@ public sealed record RiskBand(decimal MaxRisk, decimal FallbackRisk)
 public sealed record OptimizationConfig(
     int Id, TimeSpan Cutoff, RangeBand Range, VwapRule Vwap,
     decimal BreakoutPoints, decimal VolumeMultiplier, bool Retest,
-    int EsQuantity, RiskBand Risk, decimal EsTrailDollars, int MesQuantity)
+    int EsQuantity, RiskBand Risk, decimal EsTrailDollars, int MesQuantity,
+    int WeekdayMask = WeekdaySelection.All)
 {
     public string Parameters => string.Join(",",
         Cutoff.ToString(@"hh\:mm"), Range.Min, Range.Max,
         Vwap, BreakoutPoints, VolumeMultiplier, Retest,
-        EsQuantity, Risk.MaxRisk, Risk.FallbackRisk, EsTrailDollars, MesQuantity);
+        EsQuantity, Risk.MaxRisk, Risk.FallbackRisk, EsTrailDollars, MesQuantity,
+        WeekdaySelection.Format(WeekdayMask));
 }
 
 public sealed class SessionData

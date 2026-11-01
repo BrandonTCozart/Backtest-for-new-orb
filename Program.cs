@@ -7,14 +7,14 @@ using Microsoft.Extensions.Configuration;
 // Visual Studio: right-click this project -> Manage User Secrets once.
 // Thereafter the green Start button downloads a fresh 3-month CSV on every run.
 var secrets = new ConfigurationBuilder()
-    .AddUserSecrets("Backtest-for-new-orb-8a3c73df-6ef8-4900-a244-253948c8e72d")
+    .AddUserSecrets("dotnet-Backtest_for_new_orb-91f535b9-437c-4a70-ae84-ee85729d8eb9")
     .Build();
 var user = Environment.GetEnvironmentVariable("TOPSTEP_USERNAME") ?? secrets["Topstep:UserName"];
 var key = Environment.GetEnvironmentVariable("TOPSTEP_API_KEY") ?? secrets["Topstep:ApiKey"];
 if (string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(key))
 {
     Console.Error.WriteLine("Topstep credentials are missing.");
-    Console.Error.WriteLine("In Visual Studio: right-click Backtest-for-new-orb -> Manage User Secrets.");
+    Console.Error.WriteLine("In Visual Studio: right-click Backtest for new orb -> Manage User Secrets.");
     Console.Error.WriteLine("Add JSON with Topstep:UserName and Topstep:ApiKey, save, and press Start again.");
     Console.Error.WriteLine("Do not put API keys in GitHub or launchSettings.json.");
     return 1;
@@ -28,7 +28,7 @@ string FindProjectFolder()
     DirectoryInfo? folder = new DirectoryInfo(AppContext.BaseDirectory);
     while (folder != null)
     {
-        if (File.Exists(Path.Combine(folder.FullName, "Backtest-for-new-orb.csproj")))
+        if (File.Exists(Path.Combine(folder.FullName, "Backtest for new orb.csproj")))
             return folder.FullName;
         folder = folder.Parent;
     }

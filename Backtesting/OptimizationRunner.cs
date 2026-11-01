@@ -188,7 +188,7 @@ public static class OptimizationRunner
     private static IEnumerable<OptimizationConfig> EnumerateConfigurations()
     {
         object[][] axes = {
-            new object[] { new TimeSpan(10,0,0), new TimeSpan(10,30,0), new TimeSpan(11,0,0) },
+            new object[] { new TimeSpan(10,0,0), new TimeSpan(10,30,0), new TimeSpan(11,0,0), new TimeSpan(16,0,0) },
             new object[] { new RangeBand(0m,10000m), new RangeBand(6m,25m), new RangeBand(10m,40m) },
             new object[] { VwapRule.Off, VwapRule.Direction, VwapRule.DirectionAndSlope },
             new object[] { 0m, .5m, 1m },

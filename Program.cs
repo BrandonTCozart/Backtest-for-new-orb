@@ -67,7 +67,7 @@ for (var cursor = from; cursor < to;)
     string id;
     try
     {
-        if (!ids.TryGetValue(roll.symbol, out id!))
+        if (!ids.TryGetValue(roll.symbol, out id))
         {
             var response = await Post("/api/Contract/search", new { searchText = roll.symbol, live = false });
             var matches = response.GetProperty("contracts").EnumerateArray().Where(c =>

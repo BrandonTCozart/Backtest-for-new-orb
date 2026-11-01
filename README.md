@@ -14,11 +14,12 @@ Expected header: `timestamp_utc,contract,open,high,low,close,volume`.
 
 The entry is still based on the original **9:30–9:45 AM ET opening range**, and the first trade is simulated with the original ORB stages, including FVG/reference-level stop logic.
 
-The program recursively evaluates **all 20,736 combinations** of the following choices:
+The program recursively evaluates **all 642,816 combinations**: the original 20,736 settings multiplied by **31 selectable weekday combinations**. Instead of running the expensive price simulation 31 times, it reuses each simulated day's trade outcomes for every weekday filter.
 
 | Parameter | Tested values |
 | --- | --- |
 | Last eligible breakout signal close (ET) | 10:00, 10:30, 11:00, 16:00 (original no-early-cutoff behavior) |
+| **Allowed trading weekdays (ET)** | **Every nonempty Monday–Friday combination (31)**: all weekdays, any single weekday, pairs, triplets, four-day groups |
 | Opening range width, ES points | unrestricted, 6–25, 10–40 |
 | VWAP filter | off; direction confirmation; direction + 5-minute VWAP slope |
 | Extra breakout close distance past OR boundary | 0, 0.5, 1 ES point |
@@ -32,6 +33,8 @@ The program recursively evaluates **all 20,736 combinations** of the following c
 These combinations are explicitly **bounded**, not an attempt to search literally every real-valued stop setting. The original Stage 3/4 thresholds, Stage 5 activation threshold, and Stage 6 MES stop stages stay as in the `Orb` strategy. **This optimizer does not use or compare the $500/$450 profit-lock system** that was used by the preceding experiment.
 
 When retest is enabled, the simulator first detects a qualifying breakout, then waits up to five bars for the opening-range boundary to be touched and for price to close outside again.
+
+The weekday filter uses **Eastern Time** trading dates, and a skipped weekday means the strategy **does not enter a first ES trade or Stage 6 MES reversal** on that date. Filtered-out sessions do not count as incomplete/skipped data. An all-weekdays option preserves the previous optimizer behavior. The existing minimum first-ES-trade requirement still applies, so highly selective weekday groups with too few training trades cannot win.
 
 ### Important MES limitation
 
@@ -50,11 +53,13 @@ The program displays the **best training configuration**, its exact settings, to
 
 **Thousands of strategies tested on only a few weeks of ES history create significant overfitting risk.** Even a good holdout result on such a short period is weak evidence of future profitability. Increase sample coverage and retest before using a candidate with real money.
 
+The winner report now explicitly prints **Allowed trading weekdays (ET)**, and both the all-configurations and top-ten holdout CSVs include the weekday mask and readable weekday names.
+
 ## CSV output
 
 All reports go in your local `data` folder:
 
-- **`optimizer_all_configurations.csv`** — all 20,736 tested combinations with settings, training P&L, drawdown, number of trades, and eligibility.
+- **`optimizer_all_configurations.csv`** — all 642,816 tested combinations with weekday mask and names, training P&L, drawdown, number of trades, and eligibility. Rows are streamed in iteration order, not sorted by profit; check the best-configuration report or top-ten results for ranked settings.
 - **`optimizer_top10_holdout.csv`** — the top ten ranked on training results, with corresponding holdout results.
 - **`optimizer_best_trades.csv`** — first ES and any simulated MES trades for the best configuration, including per-trade and running net P&L; labels MES rows `MES_ES_PRICE_PROXY`.
 - **`optimizer_best_monthly_pnl.csv`** — monthly gross P&L, estimated costs, net P&L, cumulative net P&L.
@@ -66,6 +71,6 @@ Missing bars during an active trade cause it to be excluded. Missing entire date
 
 Entry is assumed at the **next candle's open** after a qualifying signal. Original stop stages react to **candle closes** rather than to individual quote updates as the live worker does. An already-active stop is assumed to trigger first if the same minute also has a favorable wick; gap-through-stop exits use the candle opening price. These are simulation choices, not broker-confirmed fills. Trading costs are fixed estimates.
 
-The recursive grid search may run for an extended period on slower computers. Progress is printed every 250 configurations. Close the running program or use Visual Studio Stop to cancel. The program writes final reports when all configurations have been evaluated.
+The recursive grid search may run for an extended period on slower computers. Progress is printed every 100 base configurations (3,100 weekday-filtered variants), and the all-configurations CSV is streamed incrementally. Close the running program or use Visual Studio Stop to cancel. The program writes final reports when all configurations have been evaluated.
 
 **Development status:** These changes were committed to GitHub but have not been compiled or run with your private CSV in this environment.

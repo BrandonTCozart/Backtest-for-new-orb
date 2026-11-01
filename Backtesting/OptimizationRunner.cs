@@ -51,28 +51,6 @@ public static class OptimizationRunner
         Console.WriteLine("Minimum first ES trades to qualify: " + minFirstTrades);
         Console.WriteLine("Testing every bounded grid combination recursively. Results are approximate.");
 
-        var all = new List<OptimizationResult>();
-        var total = 0;
-        foreach (var config in EnumerateConfigurations())
-        {
-            var score = OptimizationEngine.Evaluate(config, train);
-            all.Add(score);
-            total++;
-            if (total % 250 == 0)
-                Console.WriteLine("Completed " + total.ToString("N0", CI) + " combinations...");
-        }
-
-        var ranked = all.Where(x => x.EsTrades >= minFirstTrades)
-            .OrderByDescending(x => x.Net)
-            .ThenBy(x => x.MaxDrawdown)
-            .ThenByDescending(x => x.EsTrades)
-            .ToArray();
-        if (ranked.Length == 0)
-        {
-            Console.Error.WriteLine("No configurations met the minimum trade count. Try increasing historical data.");
-            return 2;
-        }
-
         Directory.CreateDirectory(folder);
         var configsFile = Path.Combine(folder, "optimizer_all_configurations.csv");
         var holdoutFile = Path.Combine(folder, "optimizer_top10_holdout.csv");
@@ -80,17 +58,65 @@ public static class OptimizationRunner
         var monthlyFile = Path.Combine(folder, "optimizer_best_monthly_pnl.csv");
         var summaryFile = Path.Combine(folder, "optimizer_best_configuration.txt");
 
-        File.WriteAllLines(configsFile, new[] {
-            "config_id,entry_cutoff_et,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts,training_net_pnl,training_gross_pnl,training_costs,training_max_closed_drawdown,training_es_trades,training_mes_trades,training_wins,training_skipped_days,qualifies"
-        }.Concat(all.OrderByDescending(x => x.Net).Select(x =>
-            x.Config.Id.ToString(CI) + "," + Params(x.Config) + "," +
-            string.Join(",", F(x.Net), F(x.Gross), F(x.Costs), F(x.MaxDrawdown),
-                x.EsTrades, x.MesTrades, x.WinningTrades, x.SkippedDays,
-                x.EsTrades >= minFirstTrades ? "yes" : "no"))));
+        const int SubsetsPerBase = WeekdaySelection.All;
+        const int BaseCount = 20736;
+        Console.WriteLine("Weekday masks: all 31 nonempty subsets of Monday–Friday.");
+        Console.WriteLine("Expected combinations: " +
+            (BaseCount * SubsetsPerBase).ToString("N0", CI) + " (20,736 × 31)");
+        Console.WriteLine("Trade simulation is reused across 31 weekday subsets.");
+        Console.WriteLine("All-configuration CSV is written incrementally to limit memory use.");
 
-        var top = ranked.Take(10).ToArray();
+        var topTen = new List<OptimizationResult>(10);
+        var qualified = 0;
+        var total = 0;
+        using (var writer = new StreamWriter(configsFile, false))
+        {
+            writer.WriteLine("config_id,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts,training_net_pnl,training_gross_pnl,training_costs,training_max_closed_drawdown,training_es_trades,training_mes_trades,training_wins,training_skipped_days,qualifies");
+            foreach (var baseConfig in EnumerateConfigurations())
+            {
+                foreach (var score in OptimizationEngine.EvaluateWeekdayVariants(baseConfig, train))
+                {
+                    total++;
+                    var qualifies = score.EsTrades >= minFirstTrades;
+                    if (qualifies)
+                    {
+                        qualified++;
+                        topTen.Add(score);
+                        topTen = topTen.OrderByDescending(x => x.Net)
+                            .ThenBy(x => x.MaxDrawdown)
+                            .ThenByDescending(x => x.EsTrades)
+                            .ThenBy(x => x.Config.Id)
+                            .Take(10).ToList();
+                    }
+                    writer.WriteLine(score.Config.Id.ToString(CI) + "," +
+                        Params(score.Config) + "," +
+                        string.Join(",", F(score.Net), F(score.Gross), F(score.Costs),
+                            F(score.MaxDrawdown), score.EsTrades, score.MesTrades,
+                            score.WinningTrades, score.SkippedDays,
+                            qualifies ? "yes" : "no"));
+                }
+                if (baseConfig.Id % 100 == 0)
+                {
+                    writer.Flush();
+                    Console.WriteLine("Base configurations " +
+                        baseConfig.Id.ToString("N0", CI) + "/" +
+                        BaseCount.ToString("N0", CI) + "; weekday variants " +
+                        total.ToString("N0", CI) + "/" +
+                        (BaseCount * SubsetsPerBase).ToString("N0", CI));
+                }
+            }
+        }
+
+        if (topTen.Count == 0)
+        {
+            Console.Error.WriteLine("No configurations met the minimum ES trade count.");
+            Console.Error.WriteLine("Partial/all tested configurations: " + configsFile);
+            return 2;
+        }
+
+        var top = topTen.ToArray();
         var testRows = new List<string> {
-            "training_rank,config_id,training_net_pnl,holdout_net_pnl,holdout_es_trades,holdout_mes_trades,holdout_wins,holdout_max_closed_drawdown,entry_cutoff_et,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts"
+            "training_rank,config_id,training_net_pnl,holdout_net_pnl,holdout_es_trades,holdout_mes_trades,holdout_wins,holdout_max_closed_drawdown,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts"
         };
         Console.WriteLine();
         Console.WriteLine("TRAINING RANKING — top ten configurations");
@@ -152,6 +178,7 @@ public static class OptimizationRunner
             "BEST BOUNDED CONFIGURATION — selected exclusively on training net P&L",
             "ID: " + best.Config.Id,
             "Entry cutoff (ET): " + best.Config.Cutoff.ToString(@"hh\:mm"),
+            "Allowed trading weekdays (ET): " + WeekdaySelection.Format(best.Config.WeekdayMask),
             "Opening range width: " + best.Config.Range.Min + "–" + best.Config.Range.Max + " ES points",
             "VWAP rule: " + best.Config.Vwap,
             "Breakout buffer: " + best.Config.BreakoutPoints + " points",
@@ -164,7 +191,7 @@ public static class OptimizationRunner
             "TRAINING net P&L: $" + F(best.Net) + ", ES trades: " + best.EsTrades + ", closed-trade max drawdown: $" + F(best.MaxDrawdown),
             "UNTOUCHED HOLDOUT net P&L: $" + F(untouched.Net) + ", ES trades: " + untouched.EsTrades + ", closed-trade max drawdown: $" + F(untouched.MaxDrawdown),
             "FULL SAMPLE net P&L (descriptive only): $" + F(full.Net) + ", ES trades: " + full.EsTrades + ", MES proxy trades: " + full.MesTrades,
-            "Configurations evaluated: " + total + "; qualified: " + ranked.Length,
+            "Configurations evaluated: " + total + "; qualified: " + qualified,
             "WARNING: Winner is optimal ONLY within this finite grid on the TRAINING sample.",
             "WARNING: MES results use ES prices; tick-level ordering, fills and actual MES prices are unknown.",
             "WARNING: The CSV sample is short; searching thousands of candidates can overfit it.",
@@ -224,6 +251,7 @@ public static class OptimizationRunner
 
     private static string Params(OptimizationConfig c) => string.Join(",",
         c.Cutoff.ToString(@"hh\:mm"),
+        c.WeekdayMask.ToString(CI), WeekdaySelection.Format(c.WeekdayMask),
         F(c.Range.Min), F(c.Range.Max), c.Vwap, F(c.BreakoutPoints),
         F(c.VolumeMultiplier), c.Retest ? "yes" : "no",
         c.EsQuantity.ToString(CI), F(c.Risk.MaxRisk),

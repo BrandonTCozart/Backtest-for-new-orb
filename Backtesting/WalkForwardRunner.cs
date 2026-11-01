@@ -12,6 +12,7 @@ public static class WalkForwardRunner
     private static readonly CultureInfo CI = CultureInfo.InvariantCulture;
     private const int BaseCombinationCount = 20736;
     private const int WeekdaySubsetCount = WeekdaySelection.All;
+    private static readonly int EconomicRuleCount = Enum.GetValues<EconomicEventRule>().Length;
 
     public static int Run()
     {
@@ -57,9 +58,10 @@ public static class WalkForwardRunner
                 " days); minimum training ES trades " + fold.MinimumTrainingTrades);
         }
         Console.WriteLine("Evaluating " +
-            (BaseCombinationCount * WeekdaySubsetCount).ToString("N0", CI) +
+            (BaseCombinationCount * WeekdaySubsetCount * EconomicRuleCount).ToString("N0", CI) +
             " configurations on EACH of 3 training windows.");
-        Console.WriteLine("Daily trade paths are reused across weekdays and folds.");
+        Console.WriteLine("Daily trade paths are reused across weekdays, event policies and folds.");
+        Console.WriteLine("Event policies: Off; skip major release days; skip 30m before/15m after intraday releases; skip FOMC decision day and prior trading day.");
         Console.WriteLine("No future test-period P&L is used to select configurations.");
 
         Directory.CreateDirectory(directory);
@@ -68,6 +70,8 @@ public static class WalkForwardRunner
         var tradesPath = Path.Combine(directory, "optimizer_walk_forward_trades.csv");
         var monthsPath = Path.Combine(directory, "optimizer_walk_forward_monthly_pnl.csv");
         var summaryPath = Path.Combine(directory, "optimizer_walk_forward_summary.txt");
+        EconomicCalendar.WriteCalendarCsv(directory);
+        Console.WriteLine("Economic release schedule: " + Path.Combine(directory, "optimizer_economic_calendar_2026.csv"));
 
         var winningTraining = new OptimizationResult?[folds.Length];
         var eligibleCount = new long[folds.Length];
@@ -76,7 +80,7 @@ public static class WalkForwardRunner
 
         using (var writer = new StreamWriter(gridPath, false))
         {
-            writer.WriteLine("config_id,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts," +
+            writer.WriteLine("config_id,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts,economic_event_rule," +
                 string.Join(",", folds.Select(f => "fold" + f.Number + "_training_net_pnl,fold" +
                     f.Number + "_training_es_trades,fold" + f.Number +
                     "_training_max_drawdown,fold" + f.Number + "_qualifies")));
@@ -101,7 +105,7 @@ public static class WalkForwardRunner
                             winningTraining[foldIndex] = score;
                     }
 
-                    // The engine emits all folds for each weekday mask in order.
+                    // The engine emits all folds for each weekday and event-policy variant in order.
                     if (foldIndex == folds.Length - 1)
                     {
                         var firstScore = scoresByFold[0];
@@ -131,7 +135,7 @@ public static class WalkForwardRunner
                     Console.WriteLine("Base configurations " + baseNumber.ToString("N0", CI) +
                         "/" + BaseCombinationCount.ToString("N0", CI) +
                         "; variants scored per fold " + evaluated.ToString("N0", CI) +
-                        "/" + (BaseCombinationCount * WeekdaySubsetCount).ToString("N0", CI));
+                        "/" + (BaseCombinationCount * WeekdaySubsetCount * EconomicRuleCount).ToString("N0", CI));
                 }
             }
         }
@@ -148,7 +152,7 @@ public static class WalkForwardRunner
         var combinedOutOfSampleTrades = new List<(int FoldNumber, SimulatedTrade Trade)>();
         var testNetByFold = new decimal[folds.Length];
         var foldReports = new List<string> {
-            "fold_number,training_start_et,training_end_et,training_sessions,minimum_training_es_trades,test_start_et,test_end_et,test_sessions,selected_config_id,training_net_pnl,training_es_trades,training_mes_proxy_trades,training_max_drawdown,test_net_pnl,test_gross_pnl,test_estimated_costs,test_es_trades,test_mes_proxy_trades,test_winning_trades,test_max_closed_drawdown,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts"
+            "fold_number,training_start_et,training_end_et,training_sessions,minimum_training_es_trades,test_start_et,test_end_et,test_sessions,selected_config_id,training_net_pnl,training_es_trades,training_mes_proxy_trades,training_max_drawdown,test_net_pnl,test_gross_pnl,test_estimated_costs,test_es_trades,test_mes_proxy_trades,test_winning_trades,test_max_closed_drawdown,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts,economic_event_rule"
         };
         var summary = new List<string> {
             "ORB WALK-FORWARD RESULTS — original stage stops; no $500/$450 profit lock",
@@ -156,6 +160,7 @@ public static class WalkForwardRunner
             "Full eligible session range: " + sessions[0].Day + " through " + sessions[^1].Day,
             "Method: expanding-window train, select on training P&L only, test immediately following dates",
             "Config grid: " + evaluated.ToString("N0", CI) + " distinct configurations, trained 3 times each",
+            "Economic rules: Off / AvoidMajorReleaseDay / AvoidIntradayReleaseWindow / AvoidFomcDayAndPriorTradingDay",
             "This is not a single winner tuned against one holdout period.",
             ""
         };
@@ -195,7 +200,8 @@ public static class WalkForwardRunner
                 " -> NEXT-BLOCK TEST $" + F(test.Net) +
                 " (" + test.EsTrades + " ES trades, " + test.MesTrades +
                 " MES proxy trades), config " + chosen.Config.Id +
-                ", days " + WeekdaySelection.Format(chosen.Config.WeekdayMask);
+                ", days " + WeekdaySelection.Format(chosen.Config.WeekdayMask) +
+                ", events " + chosen.Config.EventRule;
             Console.WriteLine(line);
             summary.Add(line);
             summary.Add("  Test dates: " + sessions[fold.TestStart].Day +
@@ -323,7 +329,8 @@ public static class WalkForwardRunner
         "; First position: " + c.EsQuantity + " ES" +
         "; Initial risk cap/fallback: $" + F(c.Risk.MaxRisk) + "/$" + F(c.Risk.FallbackRisk) +
         "; ES Stage-5 trailing: $" + F(c.EsTrailDollars) +
-        "; Optional Stage-6: " + c.MesQuantity + " MES (ES price proxy)";
+        "; Optional Stage-6: " + c.MesQuantity + " MES (ES price proxy)" +
+        "; Economic event rule: " + c.EventRule;
 
     private static string Day(DateOnly date) => date.ToString("yyyy-MM-dd", CI);
     private static string F(decimal value) => value.ToString("0.00", CI);

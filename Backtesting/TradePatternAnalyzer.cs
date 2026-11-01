@@ -371,10 +371,12 @@ public static class TradePatternAnalyzer
         value is decimal n ? n > threshold : null;
     private static string FormatComparison(Result r) =>
         r.Name + ": WITH " + r.YesLosses + " losses / " + r.YesWins +
-        " wins (" + Maybe(r.YesLossRate) + "% losses); WITHOUT " +
+        " wins (" + Rate(r.YesLossRate) + "); WITHOUT " +
         r.NoLosses + " losses / " + r.NoWins + " wins (" +
-        Maybe(r.NoLossRate) + "% losses); difference " +
-        (r.Delta >= 0m ? "+" : "") + Maybe(r.Delta) + " pp";
+        Rate(r.NoLossRate) + "); difference " +
+        (r.Delta is decimal d ? (d >= 0 ? "+" : "") + N(d) + " pp" : "n/a");
+    private static string Rate(decimal? rate) =>
+        rate is decimal value ? N(value) + "% losses" : "n/a";
     private static string YesNo(bool value) => value ? "yes" : "no";
     private static string Csv(string s) => "\"" + s.Replace("\"", "\"\"") + "\"";
     private static string Date(DateOnly date) => date.ToString("yyyy-MM-dd", CI);

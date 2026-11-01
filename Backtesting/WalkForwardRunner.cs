@@ -70,6 +70,8 @@ public static class WalkForwardRunner
         var tradesPath = Path.Combine(directory, "optimizer_walk_forward_trades.csv");
         var monthsPath = Path.Combine(directory, "optimizer_walk_forward_monthly_pnl.csv");
         var summaryPath = Path.Combine(directory, "optimizer_walk_forward_summary.txt");
+        var fullComparisonPath = Path.Combine(directory, "optimizer_full_sample_comparison.csv");
+        var latestFullTradesPath = Path.Combine(directory, "optimizer_full_sample_latest_config_trades.csv");
         EconomicCalendar.WriteCalendarCsv(directory);
         Console.WriteLine("Economic release schedule: " + Path.Combine(directory, "optimizer_economic_calendar_2026.csv"));
 
@@ -151,6 +153,10 @@ public static class WalkForwardRunner
         // winners have been chosen. These out-of-sample results select nothing.
         var combinedOutOfSampleTrades = new List<(int FoldNumber, SimulatedTrade Trade)>();
         var testNetByFold = new decimal[folds.Length];
+        var fullSampleResults = new OptimizationResult[folds.Length];
+        var fullSampleRows = new List<string> {
+            "selected_in_fold,config_id,sample_start_et,sample_end_et,opening_range_sessions,full_sample_net_pnl,full_sample_gross_pnl,full_sample_costs,full_sample_es_trades,full_sample_mes_proxy_trades,full_sample_wins,full_sample_max_closed_drawdown,selected_fold_test_net_pnl,selected_fold_test_es_trades,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts,economic_event_rule,full_sample_net_pnl,full_sample_es_trades,full_sample_mes_proxy_trades,full_sample_wins,full_sample_max_closed_drawdown"
+        };
         var foldReports = new List<string> {
             "fold_number,training_start_et,training_end_et,training_sessions,minimum_training_es_trades,test_start_et,test_end_et,test_sessions,selected_config_id,training_net_pnl,training_es_trades,training_mes_proxy_trades,training_max_drawdown,test_net_pnl,test_gross_pnl,test_estimated_costs,test_es_trades,test_mes_proxy_trades,test_winning_trades,test_max_closed_drawdown,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts,economic_event_rule"
         };
@@ -176,6 +182,22 @@ public static class WalkForwardRunner
             var test = OptimizationEngine.Evaluate(chosen.Config,
                 testingSessions, keepTrades: true);
             testNetByFold[i] = test.Net;
+
+            // Full-sample replay of THIS fold's selected configuration, including
+            // earlier training dates. Separate from the stitched walk-forward test.
+            var fullSample = OptimizationEngine.Evaluate(chosen.Config, sessions,
+                keepTrades: i == folds.Length - 1);
+            fullSampleResults[i] = fullSample;
+            fullSampleRows.Add(string.Join(",",
+                fold.Number.ToString(CI), chosen.Config.Id.ToString(CI),
+                Day(sessions[0].Day), Day(sessions[^1].Day),
+                sessions.Length.ToString(CI),
+                F(fullSample.Net), F(fullSample.Gross), F(fullSample.Costs),
+                fullSample.EsTrades.ToString(CI), fullSample.MesTrades.ToString(CI),
+                fullSample.WinningTrades.ToString(CI), F(fullSample.MaxDrawdown),
+                F(test.Net), test.EsTrades.ToString(CI),
+                OptimizationRunner.Params(chosen.Config)));
+
             foreach (var trade in test.DetailedTrades ?? [])
                 combinedOutOfSampleTrades.Add((fold.Number, trade));
 
@@ -194,7 +216,11 @@ public static class WalkForwardRunner
                 F(test.Net), F(test.Gross), F(test.Costs),
                 test.EsTrades.ToString(CI), test.MesTrades.ToString(CI),
                 test.WinningTrades.ToString(CI), F(test.MaxDrawdown),
-                OptimizationRunner.Params(chosen.Config)));
+                OptimizationRunner.Params(chosen.Config),
+                F(fullSample.Net), fullSample.EsTrades.ToString(CI),
+                fullSample.MesTrades.ToString(CI),
+                fullSample.WinningTrades.ToString(CI),
+                F(fullSample.MaxDrawdown)));
             var line = "Fold " + fold.Number + ": training $" + F(chosen.Net) +
                 " (" + chosen.EsTrades + " ES trades)" +
                 " -> NEXT-BLOCK TEST $" + F(test.Net) +
@@ -204,6 +230,13 @@ public static class WalkForwardRunner
                 ", events " + chosen.Config.EventRule;
             Console.WriteLine(line);
             summary.Add(line);
+            var fullLine = "  SAME CONFIG ON FULL DATASET: net $" +
+                F(fullSample.Net) + ", ES trades " + fullSample.EsTrades +
+                ", MES proxy trades " + fullSample.MesTrades +
+                ", wins " + fullSample.WinningTrades +
+                ", max closed-trade drawdown $" + F(fullSample.MaxDrawdown);
+            Console.WriteLine(fullLine);
+            summary.Add(fullLine);
             summary.Add("  Test dates: " + sessions[fold.TestStart].Day +
                 " to " + sessions[fold.TestEnd - 1].Day);
             summary.Add("  Qualifying training configurations: " +
@@ -213,6 +246,7 @@ public static class WalkForwardRunner
             summary.Add("");
         }
         File.WriteAllLines(foldsPath, foldReports);
+        File.WriteAllLines(fullComparisonPath, fullSampleRows);
 
         var sequenced = combinedOutOfSampleTrades
             .OrderBy(x => x.Trade.EntryAt).ToArray();
@@ -272,12 +306,44 @@ public static class WalkForwardRunner
             positiveFolds + "/" + folds.Length);
 
         var latestConfig = winningTraining[^1]!.Config;
+        var latestFull = fullSampleResults[^1];
+
+        Console.WriteLine();
+        Console.WriteLine("FULL-DATASET RESULTS (one fixed configuration per row)");
+        Console.WriteLine("All " + sessions.Length +
+            " complete opening-range sessions; each fold's chosen config replayed from first through last date.");
+        for (var i = 0; i < folds.Length; i++)
+        {
+            var result = fullSampleResults[i];
+            Console.WriteLine("Fold " + folds[i].Number + " config " + result.Config.Id +
+                ": FULL net $" + F(result.Net) +
+                ", " + result.EsTrades + " ES trades, " +
+                result.MesTrades + " MES proxy trades; corresponding test-block net $" +
+                F(testNetByFold[i]));
+        }
+        Console.WriteLine("WALK-FORWARD OOS TOTAL (different selected configs in different folds): $" +
+            F(runningNet));
+        Console.WriteLine("LATEST SELECTED CONFIG FULL-DATASET NET P&L: $" + F(latestFull.Net) +
+            " (" + latestFull.EsTrades + " ES trades, " +
+            latestFull.MesTrades + " MES proxy trades)");
+        Console.WriteLine("Full-dataset results include the training dates; walk-forward OOS excludes those dates.");
+
         Console.WriteLine();
         Console.WriteLine("MOST RECENT TRAINING-WINDOW WINNER: config " + latestConfig.Id);
         foreach (var entry in HumanSettings(latestConfig).Split("; "))
             Console.WriteLine(entry);
 
-        summary.Add("COMBINED OUT-OF-SAMPLE NET P&L: $" + F(runningNet));
+        summary.Add("COMBINED OUT-OF-SAMPLE NET P&L (stitched fold test blocks): $" + F(runningNet));
+        summary.Add("FULL-DATASET RESULTS (separate fixed-config replays):");
+        for (var i = 0; i < folds.Length; i++)
+        {
+            var full = fullSampleResults[i];
+            summary.Add("  Fold " + folds[i].Number + " selected config " + full.Config.Id +
+                ": full net $" + F(full.Net) + ", ES trades " + full.EsTrades +
+                ", MES proxy trades " + full.MesTrades +
+                ", compared with its own OOS test net $" + F(testNetByFold[i]));
+        }
+        summary.Add("LATEST TRAINING WINNER FULL-DATASET NET P&L: $" + F(latestFull.Net));
         summary.Add("Gross: $" + F(allGross) + "; estimated costs: $" + F(allCosts));
         summary.Add("Wins/losses: " + won + "/" + lost);
         summary.Add("Max cumulative closed-trade drawdown: $" + F(maxDrawdown));
@@ -285,11 +351,36 @@ public static class WalkForwardRunner
         summary.Add("Most recent fold's TRAINING winner (candidate, not proven): " + latestConfig.Id);
         summary.Add(HumanSettings(latestConfig));
         summary.Add("");
+        summary.Add("Full-dataset replays include training dates. The stitched OOS total contains only nonoverlapping test blocks.");
+        summary.Add("Full-dataset fixed-configuration results are NOT additive across folds.");
         summary.Add("All walk-forward test dates are later than their corresponding training dates.");
         summary.Add("Test-period P&L is never used to choose the fold's configuration.");
         summary.Add("The first ~40% of sessions are training-only; later ~60% are tested in three consecutive nonoverlapping blocks.");
         summary.Add("MES rows are ES-price proxies (not actual MES market data).");
         summary.Add("Quote-level stop ordering and real broker fills are unavailable; costs are estimates.");
+
+        // Save the complete trade-by-trade replay of the latest chosen
+        // configuration independently of the walk-forward test trade file.
+        decimal fullRunning = 0m;
+        var latestTradeRows = new List<string> {
+            "date_et,instrument,source_contract,quantity,direction,entry_time_et,entry_price,exit_time_et,exit_price,exit_reason,mfe_points,gross_pnl_dollars,estimated_cost_dollars,net_pnl_dollars,cumulative_full_net_pnl_dollars,period"
+        };
+        foreach (var trade in latestFull.DetailedTrades ?? [])
+        {
+            fullRunning += trade.Net;
+            var firstTestDay = sessions[folds[0].TestStart].Day;
+            var period = trade.Date < firstTestDay ? "initial_training_only" :
+                trade.Date < sessions[folds[1].TestStart].Day ? "test_block_1" :
+                trade.Date < sessions[folds[2].TestStart].Day ? "test_block_2" :
+                "test_block_3";
+            latestTradeRows.Add(string.Join(",",
+                Day(trade.Date), trade.IsMes ? "MES_ES_PRICE_PROXY" : "ES",
+                trade.Contract, trade.Quantity.ToString(CI), trade.Direction,
+                Et(trade.EntryAt), F(trade.Entry), Et(trade.ExitAt), F(trade.Exit),
+                trade.ExitReason, F(trade.MfePoints), F(trade.Gross),
+                F(trade.EstimatedCosts), F(trade.Net), F(fullRunning), period));
+        }
+        File.WriteAllLines(latestFullTradesPath, latestTradeRows);
 
         // Diagnostic only: compare entry-time conditions for wins AND losses.
         // No patterns are fed back into optimizer selection or test P&L.
@@ -298,6 +389,8 @@ public static class WalkForwardRunner
         File.WriteAllLines(summaryPath, summary);
 
         Console.WriteLine();
+        Console.WriteLine("Full-dataset comparison: " + fullComparisonPath);
+        Console.WriteLine("Latest config full-dataset trades: " + latestFullTradesPath);
         Console.WriteLine("Fold results: " + foldsPath);
         Console.WriteLine("Out-of-sample trades: " + tradesPath);
         Console.WriteLine("Out-of-sample monthly P&L: " + monthsPath);

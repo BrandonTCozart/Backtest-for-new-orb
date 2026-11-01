@@ -335,7 +335,7 @@ public static class BacktestRunner
             mfe, favorablePrice, realized, trade.CompletedStage);
     }
 
-    static List<PriceBar> Load(string path)
+    internal static List<PriceBar> Load(string path)
     {
         var rows = new SortedDictionary<DateTimeOffset, PriceBar>();
         using var reader = new StreamReader(path);
@@ -364,7 +364,7 @@ public static class BacktestRunner
         return rows.Values.ToList();
     }
 
-    static string FindRoot()
+    internal static string FindRoot()
     {
         DirectoryInfo? folder = new(AppContext.BaseDirectory);
         while (folder != null)

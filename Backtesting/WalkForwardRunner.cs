@@ -287,6 +287,11 @@ public static class WalkForwardRunner
         summary.Add("MES rows are ES-price proxies (not actual MES market data).");
         summary.Add("Quote-level stop ordering and real broker fills are unavailable; costs are estimates.");
         summary.Add("Results are not a prediction or a recommendation to deploy the settings live.");
+
+        // Diagnostic only: compare entry-time conditions for wins AND losses.
+        // No patterns are fed back into optimizer selection or test P&L.
+        summary.AddRange(TradePatternAnalyzer.Analyze(
+            directory, sessions, combinedOutOfSampleTrades));
         File.WriteAllLines(summaryPath, summary);
 
         Console.WriteLine();

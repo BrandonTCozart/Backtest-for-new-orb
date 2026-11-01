@@ -41,6 +41,34 @@ public static class OptimizationEngine
         }
     }
 
+    // For each base parameter set, compute daily trade paths once across the
+    // chronological dataset, then aggregate all 31 weekday subsets for each
+    // TRAINING window. Test windows are never passed to the scoring aggregate.
+    public static IEnumerable<(int FoldIndex, OptimizationResult Score)>
+        EvaluateWalkForwardTrainingVariants(
+            OptimizationConfig baseConfig,
+            IReadOnlyList<SessionData> sessions,
+            IReadOnlyList<WalkForwardFold> folds)
+    {
+        Validate(baseConfig);
+        var outcomes = ComputeDayOutcomes(baseConfig, sessions);
+        for (var mask = 1; mask <= WeekdaySelection.All; mask++)
+        {
+            var candidate = baseConfig with
+            {
+                WeekdayMask = mask,
+                Id = checked((baseConfig.Id - 1) * WeekdaySelection.All + mask)
+            };
+            for (var foldIndex = 0; foldIndex < folds.Count; foldIndex++)
+            {
+                var fold = folds[foldIndex];
+                yield return (foldIndex,
+                    AggregateRange(candidate, outcomes, fold.TrainingStart,
+                        fold.TrainingEnd, keepTrades: false));
+            }
+        }
+    }
+
     private static void Validate(OptimizationConfig config)
     {
         if (config.EsQuantity is < 1 or > 2 || config.MesQuantity is < 0 or > 20)
@@ -92,14 +120,20 @@ public static class OptimizationEngine
     }
 
     private static OptimizationResult Aggregate(
-        OptimizationConfig config, IReadOnlyList<DayOutcome> days, bool keepTrades)
+        OptimizationConfig config, IReadOnlyList<DayOutcome> days, bool keepTrades) =>
+        AggregateRange(config, days, 0, days.Count, keepTrades);
+
+    private static OptimizationResult AggregateRange(
+        OptimizationConfig config, IReadOnlyList<DayOutcome> days,
+        int start, int end, bool keepTrades)
     {
         var result = new OptimizationResult { Config = config };
         if (keepTrades) result.DetailedTrades = new List<SimulatedTrade>();
         decimal balance = 0m, peak = 0m;
 
-        foreach (var day in days)
+        for (var dayIndex = start; dayIndex < end; dayIndex++)
         {
+            var day = days[dayIndex];
             if (!WeekdaySelection.Includes(config.WeekdayMask, day.Day.DayOfWeek))
                 continue; // Excluded weekdays do NOT count as skipped sessions.
 

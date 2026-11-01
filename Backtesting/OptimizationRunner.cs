@@ -212,7 +212,7 @@ public static class OptimizationRunner
 
     // True recursive Cartesian-product enumeration. Every enumerated configuration
     // is evaluated, rather than randomly sampled or guessed.
-    private static IEnumerable<OptimizationConfig> EnumerateConfigurations()
+    internal static IEnumerable<OptimizationConfig> EnumerateConfigurations()
     {
         object[][] axes = {
             new object[] { new TimeSpan(10,0,0), new TimeSpan(10,30,0), new TimeSpan(11,0,0), new TimeSpan(16,0,0) },
@@ -249,7 +249,7 @@ public static class OptimizationRunner
         }
     }
 
-    private static string Params(OptimizationConfig c) => string.Join(",",
+    internal static string Params(OptimizationConfig c) => string.Join(",",
         c.Cutoff.ToString(@"hh\:mm"),
         c.WeekdayMask.ToString(CI), WeekdaySelection.Format(c.WeekdayMask),
         F(c.Range.Min), F(c.Range.Max), c.Vwap, F(c.BreakoutPoints),

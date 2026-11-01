@@ -22,7 +22,20 @@ if (string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(key))
 Console.WriteLine("Starting Topstep ES 1-minute historical download from Visual Studio.");
 var from = DateTimeOffset.UtcNow.AddMonths(-3);
 var to = DateTimeOffset.UtcNow;
-var output = "data/es_1m_3months.csv";
+// Always save beside the Visual Studio project, regardless of debugger working directory.
+string FindProjectFolder()
+{
+    DirectoryInfo? folder = new DirectoryInfo(AppContext.BaseDirectory);
+    while (folder != null)
+    {
+        if (File.Exists(Path.Combine(folder.FullName, "Backtest-for-new-orb.csproj")))
+            return folder.FullName;
+        folder = folder.Parent;
+    }
+    return Directory.GetCurrentDirectory();
+}
+var output = Path.Combine(FindProjectFolder(), "data", "es_1m_3months.csv");
+Console.WriteLine($"UTC interval: {from:O} to {to:O}");
 var allowPartial = args.Contains("--allow-partial");
 var ids = new Dictionary<string,string>();
 for (int i = 0; i < args.Length; ++i)

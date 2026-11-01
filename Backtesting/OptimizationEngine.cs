@@ -41,9 +41,10 @@ public static class OptimizationEngine
         }
     }
 
-    // Daily trade paths are simulated once for each base configuration.
-    // Each event policy and weekday combination only re-aggregates them,
-    // preserving chronological fold boundaries and preventing lookahead.
+    // Daily trade paths are simulated once per base configuration.
+    // Every weekday/event combination receives three fold-training scores
+    // and a separate full-dataset score (FoldIndex == folds.Count).
+    // The full-dataset score never influences the fold winners.
     public static IEnumerable<(int FoldIndex, OptimizationResult Score)>
         EvaluateWalkForwardTrainingVariants(
             OptimizationConfig baseConfig,
@@ -70,6 +71,11 @@ public static class OptimizationEngine
                         AggregateRange(candidate, outcomes, fold.TrainingStart,
                             fold.TrainingEnd, keepTrades: false));
                 }
+                // Also optimize the same configuration space over all available
+                // sessions to select one fixed best-overall configuration.
+                yield return (folds.Count,
+                    AggregateRange(candidate, outcomes, 0,
+                        outcomes.Count, keepTrades: false));
             }
         }
     }

@@ -16,13 +16,14 @@ public sealed record OptimizationConfig(
     int Id, TimeSpan Cutoff, RangeBand Range, VwapRule Vwap,
     decimal BreakoutPoints, decimal VolumeMultiplier, bool Retest,
     int EsQuantity, RiskBand Risk, decimal EsTrailDollars, int MesQuantity,
-    int WeekdayMask = WeekdaySelection.All)
+    int WeekdayMask = WeekdaySelection.All,
+    EconomicEventRule EventRule = EconomicEventRule.Off)
 {
     public string Parameters => string.Join(",",
         Cutoff.ToString(@"hh\:mm"), Range.Min, Range.Max,
         Vwap, BreakoutPoints, VolumeMultiplier, Retest,
         EsQuantity, Risk.MaxRisk, Risk.FallbackRisk, EsTrailDollars, MesQuantity,
-        WeekdaySelection.Format(WeekdayMask));
+        WeekdaySelection.Format(WeekdayMask), EventRule);
 }
 
 public sealed class SessionData

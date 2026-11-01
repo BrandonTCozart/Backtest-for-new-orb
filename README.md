@@ -38,13 +38,23 @@ The original [Orb](https://github.com/BrandonTCozart/Orb) repo was publicly visi
 ## What the downloader does
 
 - Logs in to TopstepX with `/api/Auth/loginKey`, based on the existing `Orb` integration.
-- Uses `/api/Contract/search` to resolve ES quarterly futures contracts.
+- Resolves ES quarterly futures contracts using `/api/Contract/searchById` first (including inactive expired IDs such as `CON.F.US.EP.U26`), then falls back to `/api/Contract/search`. The ID is verified as an ES contract before use.
 - Fetches 1-minute OHLCV candles via `/api/History/retrieveBars` in 7-day requests, under the 20,000-bar limit.
 - Changes contracts at a **calendar-based approximation** of rollover (eight days before each quarterly contract's third-Friday expiration), not an exchange-provided or volume-based continuous series.
 - Sorts bars chronologically and deduplicates minutes.
 - Logs retrieval errors and refuses to write a misleading CSV if a request fails or returns an empty window. A previously generated CSV is not changed in that case. `--allow-partial` exists for advanced troubleshooting only.
 - Makes **no trading/order requests**.
 
-**Data coverage caveats:** Some expired contracts may not resolve through the API, and Topstep may not supply three months of 1-minute history. The program will report unresolved symbols; the exact contract ID can be supplied with `--contract ESU6=ID` if needed. Empty windows are flagged, but an individual missing minute inside a nonempty window is not automatically detected. Closed market sessions are normal. The stitched CSV is not back-adjusted. Validate rollover and gap coverage before relying on the backtest.
+**Data coverage caveats:** Expired contracts may resolve successfully through the API but Topstep may no longer supply their 1-minute bars. Independent ProjectX client documentation reports that its gateway does not retain sub-hour history for expired contract months. The program must actually fetch and verify the bars; successful contract ID resolution alone is not proof of three-month data availability. The program will report unresolved symbols; the exact contract ID can be supplied with `--contract ESU6=ID` if needed. Empty windows are flagged, but an individual missing minute inside a nonempty window is not automatically detected. Closed market sessions are normal. The stitched CSV is not back-adjusted. Validate rollover and gap coverage before relying on the backtest.
 
 The code has been committed, but it has **not** been built or authenticated against your Topstep account here.
+
+
+## Why ESU6 was missing
+
+The first run downloaded ESZ6 but `/api/Contract/search` did not return ESU6. The program now tries the documented `/api/Contract/searchById` operation first with the ES contract ID convention, verifying the returned contract name and symbol. No manual ID entry is required for this attempt. If it resolves but the history endpoint returns no 1-minute bars, that is a provider data limitation rather than a login problem. The program does **not** label an incomplete history as a complete three-month CSV.
+
+Sources:
+- https://gateway.docs.projectx.com/docs/api-reference/market-data/search-contracts-by-id/
+- https://gateway.docs.projectx.com/docs/api-reference/market-data/retrieve-bars/
+- https://texascoding.github.io/project-x-py/api/client.html#contract-rolls-and-gateway-limits

@@ -4,8 +4,8 @@ A **Visual Studio 2022 .NET 10 console app** that downloads the previous **3 cal
 
 ## First-time setup (inside Visual Studio)
 
-1. Open **`Backtest-for-new-orb.sln`** in Visual Studio.
-2. In **Solution Explorer**, right-click the **Backtest-for-new-orb project** (not the solution) and choose **Manage User Secrets**.
+1. Open **`Backtest for new orb.slnx`** in Visual Studio.
+2. In **Solution Explorer**, right-click the **Backtest for new orb project** (not the solution) and choose **Manage User Secrets**.
 3. Replace the contents of the `secrets.json` editor with the following, using your *own newly rotated* API credentials:
 
 ```json
@@ -17,7 +17,7 @@ A **Visual Studio 2022 .NET 10 console app** that downloads the previous **3 cal
 }
 ```
 
-4. Save the secrets file. Set the **Backtest-for-new-orb** project as the startup project if Visual Studio asks. Choose the **Download 3 Months ES CSV** launch profile and click the **green Start arrow** (or press **F5**).
+4. Save the secrets file. Set the **Backtest for new orb** project as the startup project if Visual Studio asks. Choose the **Download 3 Months ES CSV** launch profile and click the **green Start arrow** (or press **F5**).
 
 That's it: **each subsequent Start downloads a fresh trailing 3-month CSV automatically**. You do not need to use PowerShell or supply arguments. Console progress appears while downloading.
 

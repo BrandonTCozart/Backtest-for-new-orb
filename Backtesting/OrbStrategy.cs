@@ -14,6 +14,10 @@ public sealed class OrbStrategy
     public const int Stage6EntryQuantity = 5;
     public const decimal MesPointValue = 5m;
 
+    // Backtest-only knob; live Orb remains unchanged.
+    public decimal EsTrailingDistance { get; set; } = 250m;
+
+
     public OpeningRange? GetOpeningRange(IEnumerable<Candle> candles, DateOnly tradingDate)
     {
         var rangeBars = candles.Where(candle =>
@@ -269,7 +273,7 @@ public sealed class OrbStrategy
 
         decimal? desiredProfit = null;
         var continuousTrailThreshold = trade.IsStage6 ? 500m : 1000m;
-        var trailingDistance = trade.IsStage6 ? 125m : 250m;
+        var trailingDistance = trade.IsStage6 ? 125m : EsTrailingDistance;
         if (trade.PeakProfit >= continuousTrailThreshold)
         {
             desiredProfit = trade.PeakProfit - trailingDistance;

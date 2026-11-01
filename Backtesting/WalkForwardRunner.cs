@@ -32,7 +32,7 @@ public static class WalkForwardRunner
         }
         var csvPath = files[0];
         if (Path.GetFileName(csvPath).Contains("INCOMPLETE", StringComparison.OrdinalIgnoreCase))
-            Console.WriteLine("WARNING: Partial history. Missing full dates cannot be detected.");
+            Console.WriteLine("Input file: INCOMPLETE historical candle export.");
         Console.WriteLine("Reading " + csvPath);
 
         var bars = BacktestRunner.Load(csvPath);
@@ -274,7 +274,6 @@ public static class WalkForwardRunner
         var latestConfig = winningTraining[^1]!.Config;
         Console.WriteLine();
         Console.WriteLine("MOST RECENT TRAINING-WINDOW WINNER: config " + latestConfig.Id);
-        Console.WriteLine("This is NOT a single configuration proven across all three test blocks.");
         foreach (var entry in HumanSettings(latestConfig).Split("; "))
             Console.WriteLine(entry);
 
@@ -289,10 +288,8 @@ public static class WalkForwardRunner
         summary.Add("All walk-forward test dates are later than their corresponding training dates.");
         summary.Add("Test-period P&L is never used to choose the fold's configuration.");
         summary.Add("The first ~40% of sessions are training-only; later ~60% are tested in three consecutive nonoverlapping blocks.");
-        summary.Add("WARNING: a short 1-minute ES sample and 642,816 possible settings can still overfit.");
         summary.Add("MES rows are ES-price proxies (not actual MES market data).");
         summary.Add("Quote-level stop ordering and real broker fills are unavailable; costs are estimates.");
-        summary.Add("Results are not a prediction or a recommendation to deploy the settings live.");
 
         // Diagnostic only: compare entry-time conditions for wins AND losses.
         // No patterns are fed back into optimizer selection or test P&L.

@@ -168,12 +168,28 @@ for (var cursor = from; cursor < to;)
     cursor = segmentEnd;
 }
 foreach (var problem in problems) Console.Error.WriteLine("WARNING " + problem);
-if (results.Count == 0 || (problems.Count != 0 && !allowPartial))
+if (results.Count == 0)
 {
-    Console.Error.WriteLine("No complete CSV generated. Use --allow-partial only after checking missing data.");
+    Console.Error.WriteLine("No historical candles were returned. No CSV was created.");
+    return 1;
+}
+
+var csvHeader = "timestamp_utc,contract,open,high,low,close,volume";
+if (problems.Count != 0 && !allowPartial)
+{
+    // Preserve usable candles without naming the output as a complete 3-month series.
+    var incompleteFile = Path.Combine(
+        Path.GetDirectoryName(Path.GetFullPath(output))!,
+        Path.GetFileNameWithoutExtension(output) + "_INCOMPLETE.csv");
+    Directory.CreateDirectory(Path.GetDirectoryName(incompleteFile)!);
+    await File.WriteAllLinesAsync(incompleteFile, new[] { csvHeader }.Concat(results.Values));
+    Console.Error.WriteLine("Three-month history INCOMPLETE: " + problems.Count + " failed or empty windows.");
+    Console.Error.WriteLine($"Saved {results.Count} available candles to: {incompleteFile}");
+    Console.Error.WriteLine("This CSV is NOT a complete 3-month dataset. Do not use it for full-period backtesting.");
+    Console.Error.WriteLine("The normal output path was not changed.");
     return 1;
 }
 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
-await File.WriteAllLinesAsync(output, new[] { "timestamp_utc,contract,open,high,low,close,volume" }.Concat(results.Values));
+await File.WriteAllLinesAsync(output, new[] { csvHeader }.Concat(results.Values));
 Console.WriteLine("Saved " + results.Count + " bars to " + output);
 return problems.Count == 0 ? 0 : 2;

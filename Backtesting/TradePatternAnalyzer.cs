@@ -192,8 +192,6 @@ public static class TradePatternAnalyzer
             "Every criterion is compared against BOTH winning and losing trades.",
             "WITH = condition true; WITHOUT = condition false. Missing measurements are excluded.",
             "Positive loss-rate difference: worse outcomes WITH the condition; negative: better.",
-            "Comparisons are descriptive, NOT causal or predictive evidence.",
-            "Five or more WITH and WITHOUT observations is only a basic display threshold, NOT statistical significance.",
             ""
         };
 
@@ -224,10 +222,6 @@ public static class TradePatternAnalyzer
             Path.GetFileName(observationsFile));
         summary.Add("Exit reason and MFE are AFTER-THE-FACT outcomes, never used as predictive inputs.");
         summary.Add("If a condition appears in both winners and losers, that is expected; its comparative rates matter.");
-        summary.Add("All criteria are correlated and the sample is small; the largest differences may be chance.");
-        summary.Add("IMPORTANT: Inspecting walk-forward test trades for patterns uses those test outcomes for research.");
-        summary.Add("DO NOT retune rules using these results and then call the SAME periods unseen.");
-        summary.Add("Validate new hypotheses on fresh later data using a new walk-forward evaluation.");
         File.WriteAllLines(summaryFile, summary);
 
         Console.WriteLine();
@@ -243,7 +237,6 @@ public static class TradePatternAnalyzer
             if (!string.IsNullOrEmpty(line)) Console.WriteLine(line);
         }
         Console.WriteLine("Each row reports BOTH winners and losers satisfying the condition.");
-        Console.WriteLine("These findings are not verified predictors; validate on NEW unseen data.");
         Console.WriteLine("Pattern comparisons: " + comparisonsFile);
         Console.WriteLine("Trade observations: " + observationsFile);
         Console.WriteLine("Pattern summary: " + summaryFile);
@@ -254,9 +247,7 @@ public static class TradePatternAnalyzer
             "ES samples: " + records.Count + ", wins: " + winners + ", losses/breakeven: " +
                 losers + ", baseline loss/breakeven rate: " + N(baseline) + "%",
             ..greater.Select(FormatComparison),
-            ..lesser.Select(FormatComparison),
-            "The reported associations may also occur in winners and are NOT validated predictors.",
-            "New rules proposed from these test labels must be evaluated on NEW unseen dates."
+            ..lesser.Select(FormatComparison)
         ];
     }
 

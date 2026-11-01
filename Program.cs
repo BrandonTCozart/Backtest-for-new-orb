@@ -1,13 +1,13 @@
 using Backtest_for_new_orb;
 
-// Visual Studio Start now explores the finite grid of ORB configurations locally.
-// The downloaded ES CSV stays on disk. The live Orb worker is never invoked.
+// Pressing Play runs chronological, expanding-window walk-forward testing.
+// It never calls Topstep, downloads candles, or places live orders.
 try
 {
-    return OptimizationRunner.Run();
+    return WalkForwardRunner.Run();
 }
-catch (Exception ex)
+catch (Exception error)
 {
-    Console.Error.WriteLine("Optimization failed: " + ex);
+    Console.Error.WriteLine("Walk-forward optimization failed: " + error);
     return 1;
 }

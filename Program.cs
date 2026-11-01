@@ -95,12 +95,50 @@ for (var cursor = from; cursor < to;)
     {
         if (!ids.TryGetValue(roll.symbol, out id))
         {
-            var response = await Post("/api/Contract/search", new { searchText = roll.symbol, live = false });
-            var matches = response.GetProperty("contracts").EnumerateArray().Where(c =>
-                c.TryGetProperty("name", out var n) && n.GetString()?.Equals(roll.symbol, StringComparison.OrdinalIgnoreCase) == true).ToArray();
-            if (matches.Length != 1) throw new Exception("No unique exact contract; supply --contract " + roll.symbol + "=ID");
-            id = matches[0].GetProperty("id").GetString()!;
+            // /Contract/search returns a limited list and may omit expired contracts.
+            // ProjectX documents an ID lookup that can return inactive quarterly contracts.
+            var expectedId = $"CON.F.US.EP.{roll.symbol[2]}{roll.date.Year % 100:00}";
+            Console.WriteLine($"Resolving {roll.symbol} by ID: {expectedId}");
+            string? resolvedId = null;
+            try
+            {
+                var details = await Post("/api/Contract/searchById", new { contractId = expectedId });
+                if (details.TryGetProperty("contract", out var contract) &&
+                    contract.ValueKind == JsonValueKind.Object &&
+                    contract.TryGetProperty("id", out var contractId) &&
+                    string.Equals(contractId.GetString(), expectedId, StringComparison.OrdinalIgnoreCase) &&
+                    contract.TryGetProperty("symbolId", out var symbolId) &&
+                    symbolId.GetString() == "F.US.EP" &&
+                    contract.TryGetProperty("name", out var name) &&
+                    string.Equals(name.GetString(), roll.symbol, StringComparison.OrdinalIgnoreCase))
+                {
+                    resolvedId = expectedId;
+                }
+                else
+                {
+                    Console.WriteLine($"ID lookup did not return a matching ES contract for {roll.symbol}.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"ID lookup unavailable for {roll.symbol}: {ex.Message}. Trying name search.");
+            }
+
+            if (resolvedId is null)
+            {
+                var response = await Post("/api/Contract/search", new { searchText = roll.symbol, live = false });
+                var matches = response.GetProperty("contracts").EnumerateArray().Where(c =>
+                    c.TryGetProperty("name", out var name) &&
+                    string.Equals(name.GetString(), roll.symbol, StringComparison.OrdinalIgnoreCase) &&
+                    c.TryGetProperty("symbolId", out var symbolId) &&
+                    symbolId.GetString() == "F.US.EP").ToArray();
+                if (matches.Length != 1)
+                    throw new Exception($"Could not identify expired contract {roll.symbol} through lookup-by-ID or search. Topstep may not expose it.");
+                resolvedId = matches[0].GetProperty("id").GetString();
+            }
+            id = resolvedId ?? throw new Exception("Contract lookup returned no ID.");
         }
+        Console.WriteLine($"Using contract ID for {roll.symbol}: {id}");
     }
     catch (Exception ex) { problems.Add(roll.symbol + ": " + ex.Message); cursor = segmentEnd; continue; }
     for (var start = cursor; start < segmentEnd;)

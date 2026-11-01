@@ -25,9 +25,9 @@ public static class BacktestRunner
         Console.WriteLine("Local CSV only; no download, Topstep login or orders.");
         var root = FindRoot();
         var dir = Path.Combine(root, "data");
+        // Prefer the complete history when both files are present.
         var files = new[] { "es_1m_3months.csv", "es_1m_3months_INCOMPLETE.csv" }
-            .Select(n => Path.Combine(dir, n)).Where(File.Exists)
-            .OrderByDescending(File.GetLastWriteTimeUtc).ToArray();
+            .Select(n => Path.Combine(dir, n)).Where(File.Exists).ToArray();
         if (files.Length == 0)
         {
             Console.Error.WriteLine("No ES candles found. Put es_1m_3months.csv or es_1m_3months_INCOMPLETE.csv in: " + dir);
@@ -149,6 +149,8 @@ public static class BacktestRunner
         Console.WriteLine("Max closed-trade equity drawdown: $" + worstDrawdown.ToString("N2", CI));
         Console.WriteLine("Trades reaching +$500: " +
             trades.Count(t => ProfitLockLadder.LockedProfitFromFavorablePoints(t.MfePoints) is not null));
+        Console.WriteLine("Same-candle target/stop ambiguous exits: " +
+            trades.Count(t => t.ExitReason == "ladder-stop-same-bar-assumed"));
         Console.WriteLine("Average MFE: " +
             trades.Average(t => t.MfePoints).ToString("0.00", CI) + " ES points");
         foreach (var side in new[] { TradeDirection.Long, TradeDirection.Short })

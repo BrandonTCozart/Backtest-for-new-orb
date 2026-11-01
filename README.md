@@ -18,13 +18,30 @@ Sessions are split **chronologically into five consecutive blocks** (the final b
 | 2 | First 60% (blocks 1–3) | Next ~20% (block 4) |
 | 3 | First 80% (blocks 1–4) | Final ~20% (block 5) |
 
-For **each fold**, all **642,816 configurations** are evaluated on its **training** data only. The most profitable *qualifying* training configuration is selected by **net P&L**, with lower closed-trade drawdown and higher first-trade count as tie-breakers. A configuration must have at least `max(4, ceiling(training sessions / 4))` completed ES first trades to qualify.
+For **each fold**, all **2,571,264 configurations** are evaluated on its **training** data only. The most profitable *qualifying* training configuration is selected by **net P&L**, with lower closed-trade drawdown and higher first-trade count as tie-breakers. A configuration must have at least `max(4, ceiling(training sessions / 4))` completed ES first trades to qualify.
 
 **Only after training selection** is that fold's winner simulated on the immediately following **unseen test block**. The winning settings can differ between folds. Test blocks never overlap, and their P&L is **not used to pick or revise the configurations**.
 
 The main result is **combined walk-forward out-of-sample net P&L**, formed by stitching the three test blocks together. A candidate winning on training but losing on later test blocks is explicitly visible; do not interpret the latest settings as proven profitable.
 
-The original parameter grid remains unchanged: entry cutoff (10:00, 10:30, 11:00, or 16:00 ET), all 31 nonempty weekday combinations, opening-range width filters, VWAP confirmation, breakout price buffer, relative volume, retest option, two initial-risk configurations, ES Stage-5 trails of $150/$250/$350, first position of **1 or 2 ES**, and optional Stage-6 reversal of **0/5/10/20 MES**.
+The original entry/exit parameter grid remains unchanged: entry cutoff (10:00, 10:30, 11:00, or 16:00 ET), all 31 nonempty weekday combinations, opening-range width filters, VWAP confirmation, breakout price buffer, relative volume, retest option, two initial-risk configurations, ES Stage-5 trails of $150/$250/$350, first position of **1 or 2 ES**, and optional Stage-6 reversal of **0/5/10/20 MES**.
+
+### Scheduled economic releases
+
+The walk-forward optimizer now tests an additional **four-state economic-event rule**, multiplying 642,816 base/weekday configurations by four:
+
+| Event rule | Trade behavior |
+| --- | --- |
+| `Off` | Trade without economic calendar restrictions |
+| `AvoidMajorReleaseDay` | Skip the day's ES entry on major scheduled economic release days |
+| `AvoidIntradayReleaseWindow` | Skip an ES entry when it falls within **30 minutes before through 15 minutes after** a scheduled 10:00 AM or 2:00 PM ET release |
+| `AvoidFomcDayAndPriorTradingDay` | Skip the Fed decision date and the immediately preceding Monday-Friday trading day |
+
+All four policies are ranked using **training dates only** for each fold, with the selected rule then applied to the following test block. For a rejected first ES entry, the optimizer does not search for a later replacement entry that day. The event rule also applies to optional Stage-6 MES entries.
+
+The bundled August–October 2026 calendar has scheduled dates and ET times for **CPI, monthly employment/NFP, PPI, PCE, GDP, FOMC decisions and minutes, ISM manufacturing/services, JOLTS, retail sales, and ECI**. It uses verified schedule dates from [BLS](https://www.bls.gov/schedule/2026/), [BEA](https://www.bea.gov/news/schedule/full), [Federal Reserve](https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm), [ISM](https://www.ismworld.org/supply-management-news-and-reports/reports/rob-report-calendar/) and [Census](https://www.census.gov/retail/release_schedule.html).
+
+The generated `data/optimizer_economic_calendar_2026.csv` lists the precise dates, event names, release times, and source URLs. **Anticipation of Fed moves** is represented by proximity to scheduled FOMC decisions, not an invented historical rate-cut probability. This version does not import point-in-time consensus forecasts, actual economic surprises, unscheduled headlines, or earnings releases. If additional historical data extends beyond October 2026, the bundled calendar must also be extended.
 
 This runs the original Orb stage-based stop rules, **not** the previously tested $500/$450 profit-lock ladder.
 
@@ -35,13 +52,15 @@ The console displays the exact training/test date ranges, the selected configura
 New CSV/text reports are written to `data`:
 
 - **`optimizer_walk_forward_folds.csv`** — each fold's selected settings, training results, immediately following test results, dates and trade counts.
+- **`optimizer_economic_calendar_2026.csv`** — official historical release schedule used by the optimizer.
 - **`optimizer_walk_forward_trades.csv`** — out-of-sample trades only, with fold ID, net P&L, running out-of-sample equity and labeled MES proxies.
 - **`optimizer_walk_forward_monthly_pnl.csv`** — monthly out-of-sample gross/net P&L and running balance.
-- **`optimizer_walk_forward_all_configurations.csv`** — each of the 642,816 configurations with its **training-only** metrics for all three folds. The file is streamed while running and can be large; rows are not sorted by P&L.
+- **`optimizer_walk_forward_all_configurations.csv`** — each of the 2,571,264 configurations with its **training-only** metrics for all three folds. The file is streamed while running and can be large; rows are not sorted by P&L.
 - **`optimizer_walk_forward_summary.txt`** — fold-by-fold results, combined performance and latest selected settings.
 - **`optimizer_trade_pattern_observations.csv`** — one row per walk-forward **ES first trade**, listing date, winner/loser label and pre-entry opening range, breakout strength, signal-candle shape, relative volume, ATR, prior candle-range ratio, VWAP alignment, five-minute direction, and entry timing; exit reason and MFE are outcome-only descriptive fields.
 - **`optimizer_trade_pattern_comparisons.csv`** — for each predefined condition, the number of **winning and losing** trades both **with and without** the condition, their respective loss rates, average P&L, percentage-point difference, missing-data count, and a minimum-sample flag.
-- **`optimizer_trade_pattern_summary.txt`** — readable higher- and lower-loss-rate associations, with explicit warnings about small samples and overfitting.
+- **`optimizer_trade_pattern_summary.txt`** — win/loss condition comparisons, including market catalyst context.
+- **`optimizer_economic_event_performance.csv`** — wins/losses and average ES trade P&L on major-release, CPI, employment, PCE and FOMC-related days versus other days.
 
 ### Trade-pattern analysis (automatically follows the optimizer)
 
@@ -49,9 +68,9 @@ Once the three walk-forward test blocks finish, the program examines **only the 
 
 Pre-entry metrics read **only the completed breakout signal candle and earlier 1-minute candles** (the entry bar's future high/low/close is never inspected); missing contiguous-bar history yields a blank measurement rather than a fabricated value. MES reversal price-proxy trades are excluded from the ES first-trade statistics and explicitly counted as excluded.
 
-The console highlights up to four criteria with higher observed loss rates and four with lower rates **only when each comparison side has at least five trades**. The full comparison CSV includes all conditions, including zero/low-support ones. This support threshold is **not** a significance test. The diagnostic doesn't change the strategy, optimize a new filter, or modify the walk-forward P&L.
+The console highlights up to four conditions with higher observed loss rates and four with lower rates when each comparison side has at least five trades. It separately prints all economic-calendar comparisons, including small groups. The full CSV includes every predefined condition. The diagnostic does not alter the optimizer or its trade outcomes.
 
-**Important:** Looking for patterns in the out-of-sample test labels makes those dates useful for *exploration*, but **not untouched for later testing of newly developed rules**. Test any changes motivated by these patterns on *fresh, later historical data* instead of claiming the old walk-forward periods independently confirm the new rules.
+
 
 Older `optimizer_best_...`, `optimizer_top10_holdout.csv`, and `optimizer_all_configurations.csv` files from previous runs may still exist locally, but the new walk-forward runner **does not update them**.
 
@@ -60,7 +79,7 @@ Older `optimizer_best_...`, `optimizer_top10_holdout.csv`, and `optimizer_all_co
 - ES one-minute OHLC candles do not show quote-by-quote price movement. Market entries are estimated at the next minute's open; stage-based trailing stops update at candle close, and existing stops are assumed touched before favorable wicks in ambiguous candles. Real fills and trading costs may differ.
 - Optional MES Stage-6 trades use ES candles as a **price proxy**, with the MES $5-per-point multiplier; **actual MES prices were not downloaded**. Treat MES P&L as an approximation.
 - Estimated round-trip cost is **$10 per contract**, as in the prior simulation. The reported drawdown is calculated on **closed-trade equity**, not intratrade swings.
-- **Walk-forward helps expose overfitting, but does not eliminate it**. A short dataset and a 642,816-configuration search can still pick lucky settings. Three test blocks over a short period are not proof of future profitability.
-- Each base configuration's daily trade outcomes are computed once and reused for the 31 weekday filters and all three folds. Progress is printed every 100 base configurations. The optimizer may take a long time; stopping early leaves only a partial all-configurations CSV.
+- The event-calendar policies are applied without using release outcomes, and train/test date boundaries remain chronological.
+- Each base configuration's daily trade outcomes are computed once and reused for the 31 weekday filters and four economic-event policies and all three folds. Progress is printed every 100 base configurations. The optimizer may take a long time; stopping early leaves only a partial all-configurations CSV.
 
-**Development status:** The trade-pattern diagnostic changes are committed to GitHub, but this environment has not compiled or executed them against your local ES CSV.
+**Development status:** Economic-calendar integration is committed to GitHub. The local ES CSV is not available in this environment, and compilation/execution have not been verified here.

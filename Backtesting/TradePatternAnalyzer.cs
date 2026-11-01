@@ -18,7 +18,10 @@ public static class TradePatternAnalyzer
         decimal? DirectionalBodyFraction, decimal? DirectionalCloseLocation,
         decimal? SignalVolumeRatio, decimal? Atr14Points,
         decimal? SignalRangeVsPrior10, decimal? DirectionalVwapDistance,
-        decimal? DirectionalFiveMinuteChange);
+        decimal? DirectionalFiveMinuteChange,
+        bool MajorEventDay, bool CpiDay, bool JobsDay, bool FomcDay,
+        bool PceDay, bool ScheduledTenAmEventDay, bool FedDecisionEve,
+        int? CalendarDaysToNextFed, string EconomicEventCodes);
 
     private sealed record Criterion(string Name, Func<Features, bool?> Matches);
 
@@ -65,7 +68,7 @@ public static class TradePatternAnalyzer
         var summaryFile = Path.Combine(folder, "optimizer_trade_pattern_summary.txt");
 
         var observationRows = new List<string> {
-            "fold,date_et,source_contract,side,quantity,entry_time_et,exit_reason,net_pnl_dollars,winning_trade,orb_width_points,breakout_beyond_or_points,signal_body_directional_fraction,signal_close_directional_location,signal_volume_vs_prior10,preentry_atr14_points,signal_range_vs_prior10,directional_vwap_distance_points,directional_five_minute_price_change_points,mfe_points"
+            "fold,date_et,source_contract,side,quantity,entry_time_et,exit_reason,net_pnl_dollars,winning_trade,orb_width_points,breakout_beyond_or_points,signal_body_directional_fraction,signal_close_directional_location,signal_volume_vs_prior10,preentry_atr14_points,signal_range_vs_prior10,directional_vwap_distance_points,directional_five_minute_price_change_points,mfe_points,major_economic_event_day,cpi_day,employment_report_day,fomc_decision_day,pce_day,scheduled_10am_event_day,day_before_fomc,calendar_days_until_next_fomc,economic_event_codes"
         };
         foreach (var f in records)
         {
@@ -78,13 +81,26 @@ public static class TradePatternAnalyzer
                 Maybe(f.DirectionalCloseLocation), Maybe(f.SignalVolumeRatio),
                 Maybe(f.Atr14Points), Maybe(f.SignalRangeVsPrior10),
                 Maybe(f.DirectionalVwapDistance), Maybe(f.DirectionalFiveMinuteChange),
-                N(f.Trade.MfePoints)));
+                N(f.Trade.MfePoints),
+                YesNo(f.MajorEventDay), YesNo(f.CpiDay), YesNo(f.JobsDay),
+                YesNo(f.FomcDay), YesNo(f.PceDay), YesNo(f.ScheduledTenAmEventDay),
+                YesNo(f.FedDecisionEve), f.CalendarDaysToNextFed?.ToString(CI) ?? "",
+                f.EconomicEventCodes));
         }
         File.WriteAllLines(observationsFile, observationRows);
 
         // These are PREDECLARED, easy-to-interpret conditions. The diagnostic
         // scans neither arbitrarily optimized thresholds nor combinations of rules.
         var criteria = new Criterion[] {
+            new("Any major economic release day", f => f.MajorEventDay),
+            new("CPI release day", f => f.CpiDay),
+            new("Employment report / NFP release day", f => f.JobsDay),
+            new("FOMC decision day", f => f.FomcDay),
+            new("Day before FOMC decision", f => f.FedDecisionEve),
+            new("FOMC decision within 3 calendar days", f =>
+                f.CalendarDaysToNextFed is int days ? days <= 3 : null),
+            new("PCE release day", f => f.PceDay),
+            new("Scheduled 10 AM ET economic release day", f => f.ScheduledTenAmEventDay),
             new("Monday", f => f.Weekday == DayOfWeek.Monday),
             new("Tuesday", f => f.Weekday == DayOfWeek.Tuesday),
             new("Wednesday", f => f.Weekday == DayOfWeek.Wednesday),
@@ -301,11 +317,21 @@ public static class TradePatternAnalyzer
             ? side * (signal.C - vwap) : null;
 
         var entryEt = MarketTime.ToEastern(trade.EntryAt);
+        var economicEvents = EconomicCalendar.Events(trade.Date);
         return new Features(fold, trade, entryEt.TimeOfDay,
             entryEt.DayOfWeek, orb.Width,
             side > 0m ? signal.C - orb.High : orb.Low - signal.C,
             directionalBodyFraction, directionalCloseLocation, volumeRatio,
-            atr14, signalRangeVsPrior, distanceVwap, fiveMinuteDrift);
+            atr14, signalRangeVsPrior, distanceVwap, fiveMinuteDrift,
+            EconomicCalendar.IsMajorEventDay(trade.Date),
+            economicEvents.Any(e => e.Code == "CPI"),
+            economicEvents.Any(e => e.Code == "NFP"),
+            economicEvents.Any(e => e.Code == "FOMC_DECISION"),
+            economicEvents.Any(e => e.Code == "PCE"),
+            economicEvents.Any(e => e.TimeEt == new TimeSpan(10, 0, 0)),
+            EconomicCalendar.IsBeforeFedDecision(trade.Date),
+            EconomicCalendar.CalendarDaysUntilNextFedDecision(trade.Date),
+            EconomicCalendar.Codes(trade.Date));
     }
 
     // priorMinutes guarantees exact, uninterrupted same-session minutes.
@@ -328,6 +354,7 @@ public static class TradePatternAnalyzer
         r.NoLosses + " losses / " + r.NoWins + " wins (" +
         Maybe(r.NoLossRate) + "% losses); difference " +
         (r.Delta >= 0m ? "+" : "") + Maybe(r.Delta) + " pp";
+    private static string YesNo(bool value) => value ? "yes" : "no";
     private static string Csv(string s) => "\"" + s.Replace("\"", "\"\"") + "\"";
     private static string Date(DateOnly date) => date.ToString("yyyy-MM-dd", CI);
     private static string N(decimal number) => number.ToString("0.00", CI);

@@ -71,7 +71,7 @@ public static class OptimizationRunner
         var total = 0;
         using (var writer = new StreamWriter(configsFile, false))
         {
-            writer.WriteLine("config_id,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts,training_net_pnl,training_gross_pnl,training_costs,training_max_closed_drawdown,training_es_trades,training_mes_trades,training_wins,training_skipped_days,qualifies");
+            writer.WriteLine("config_id,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts,economic_event_rule,training_net_pnl,training_gross_pnl,training_costs,training_max_closed_drawdown,training_es_trades,training_mes_trades,training_wins,training_skipped_days,qualifies");
             foreach (var baseConfig in EnumerateConfigurations())
             {
                 foreach (var score in OptimizationEngine.EvaluateWeekdayVariants(baseConfig, train))
@@ -116,7 +116,7 @@ public static class OptimizationRunner
 
         var top = topTen.ToArray();
         var testRows = new List<string> {
-            "training_rank,config_id,training_net_pnl,holdout_net_pnl,holdout_es_trades,holdout_mes_trades,holdout_wins,holdout_max_closed_drawdown,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts"
+            "training_rank,config_id,training_net_pnl,holdout_net_pnl,holdout_es_trades,holdout_mes_trades,holdout_wins,holdout_max_closed_drawdown,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts,economic_event_rule"
         };
         Console.WriteLine();
         Console.WriteLine("TRAINING RANKING — top ten configurations");
@@ -188,6 +188,7 @@ public static class OptimizationRunner
             "Initial risk cap / fallback: $" + best.Config.Risk.MaxRisk + " / $" + best.Config.Risk.FallbackRisk + " (total trade)",
             "Stage-5 trail: $" + best.Config.EsTrailDollars + " (original $1000 activation)",
             "Optional Stage-6 position: " + best.Config.MesQuantity + " MES (ES-derived price proxy)",
+            "Economic event rule: " + best.Config.EventRule,
             "TRAINING net P&L: $" + F(best.Net) + ", ES trades: " + best.EsTrades + ", closed-trade max drawdown: $" + F(best.MaxDrawdown),
             "UNTOUCHED HOLDOUT net P&L: $" + F(untouched.Net) + ", ES trades: " + untouched.EsTrades + ", closed-trade max drawdown: $" + F(untouched.MaxDrawdown),
             "FULL SAMPLE net P&L (descriptive only): $" + F(full.Net) + ", ES trades: " + full.EsTrades + ", MES proxy trades: " + full.MesTrades,

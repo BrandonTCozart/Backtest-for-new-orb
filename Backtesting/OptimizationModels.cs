@@ -86,7 +86,11 @@ public static class OptimizationData
             var day = g.Key;
             var from = MarketTime.ToUtc(day.AddDays(-7), TimeOnly.MinValue);
             var to = MarketTime.ToUtc(day, new TimeOnly(9,45));
-            var past = all.Where(x => x.T >= from && x.T < to)
+            // The live worker requests history for the active contract.
+            // Do not join price/FVG history across futures contract rolls.
+            var contract = bars[0].Contract;
+            var past = all.Where(x => x.T >= from && x.T < to &&
+                        string.Equals(x.Contract, contract, StringComparison.OrdinalIgnoreCase))
                 .Select(x => x.C).ToArray();
             var opening = logic.GetOpeningRange(bars.Select(x => x.C), day);
             var lr = logic.GetReferenceLevels(past, day);

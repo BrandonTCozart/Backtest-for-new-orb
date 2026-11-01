@@ -72,11 +72,16 @@ public static class WalkForwardRunner
         var summaryPath = Path.Combine(directory, "optimizer_walk_forward_summary.txt");
         var fullComparisonPath = Path.Combine(directory, "optimizer_full_sample_comparison.csv");
         var latestFullTradesPath = Path.Combine(directory, "optimizer_full_sample_latest_config_trades.csv");
+        var optimalFullTradesPath = Path.Combine(directory, "optimizer_full_dataset_best_trades.csv");
+        var optimalFullSummaryPath = Path.Combine(directory, "optimizer_full_dataset_best_summary.txt");
         EconomicCalendar.WriteCalendarCsv(directory);
         Console.WriteLine("Economic release schedule: " + Path.Combine(directory, "optimizer_economic_calendar_2026.csv"));
 
         var winningTraining = new OptimizationResult?[folds.Length];
         var eligibleCount = new long[folds.Length];
+        var minimumFullSampleTrades = Math.Max(4, (sessions.Length + 3) / 4);
+        OptimizationResult? fullDatasetWinner = null;
+        long eligibleFullCount = 0;
         long evaluated = 0;
         int baseNumber = 0;
 
@@ -85,31 +90,44 @@ public static class WalkForwardRunner
             writer.WriteLine("config_id,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts,economic_event_rule," +
                 string.Join(",", folds.Select(f => "fold" + f.Number + "_training_net_pnl,fold" +
                     f.Number + "_training_es_trades,fold" + f.Number +
-                    "_training_max_drawdown,fold" + f.Number + "_qualifies")));
+                    "_training_max_drawdown,fold" + f.Number + "_qualifies")) +
+                ",full_sample_net_pnl,full_sample_gross_pnl,full_sample_costs,full_sample_es_trades,full_sample_mes_proxy_trades,full_sample_wins,full_sample_max_drawdown,full_sample_qualifies");
 
             foreach (var baseConfig in OptimizationRunner.EnumerateConfigurations())
             {
                 baseNumber++;
                 var scoresByFold = new OptimizationResult[folds.Length];
-                // Each base configuration's price/stop path is calculated just once
-                // for the full chronological set. For each mask, aggregate training
-                // windows only; do NOT score or optimize against future test blocks.
+                // The engine reuses each candidate's simulated daily trades for
+                // three training folds and a separate full-dataset ranking.
                 foreach (var (foldIndex, score) in
                          OptimizationEngine.EvaluateWalkForwardTrainingVariants(
                              baseConfig, sessions, folds))
                 {
-                    scoresByFold[foldIndex] = score;
-                    var eligible = score.EsTrades >= folds[foldIndex].MinimumTrainingTrades;
-                    if (eligible)
+                    if (foldIndex < folds.Length)
                     {
-                        eligibleCount[foldIndex]++;
-                        if (IsBetter(score, winningTraining[foldIndex]))
-                            winningTraining[foldIndex] = score;
+                        scoresByFold[foldIndex] = score;
+                        var eligibleTraining = score.EsTrades >=
+                            folds[foldIndex].MinimumTrainingTrades;
+                        if (eligibleTraining)
+                        {
+                            eligibleCount[foldIndex]++;
+                            if (IsBetter(score, winningTraining[foldIndex]))
+                                winningTraining[foldIndex] = score;
+                        }
                     }
 
-                    // The engine emits all folds for each weekday and event-policy variant in order.
-                    if (foldIndex == folds.Length - 1)
+                    // Full-sample score arrives after the three fold scores
+                    // for the same candidate. It is used ONLY for selecting
+                    // the fixed best-overall configuration.
+                    if (foldIndex == folds.Length)
                     {
+                        bool qualifiesFull = score.EsTrades >= minimumFullSampleTrades;
+                        if (qualifiesFull)
+                        {
+                            eligibleFullCount++;
+                            if (IsBetter(score, fullDatasetWinner))
+                                fullDatasetWinner = score;
+                        }
                         var firstScore = scoresByFold[0];
                         writer.Write(firstScore.Config.Id.ToString(CI));
                         writer.Write(',');
@@ -126,6 +144,22 @@ public static class WalkForwardRunner
                             writer.Write(',');
                             writer.Write(item.EsTrades >= folds[i].MinimumTrainingTrades ? "yes" : "no");
                         }
+                        writer.Write(',');
+                        writer.Write(F(score.Net));
+                        writer.Write(',');
+                        writer.Write(F(score.Gross));
+                        writer.Write(',');
+                        writer.Write(F(score.Costs));
+                        writer.Write(',');
+                        writer.Write(score.EsTrades.ToString(CI));
+                        writer.Write(',');
+                        writer.Write(score.MesTrades.ToString(CI));
+                        writer.Write(',');
+                        writer.Write(score.WinningTrades.ToString(CI));
+                        writer.Write(',');
+                        writer.Write(F(score.MaxDrawdown));
+                        writer.Write(',');
+                        writer.Write(qualifiesFull ? "yes" : "no");
                         writer.WriteLine();
                         evaluated++;
                     }
@@ -142,9 +176,9 @@ public static class WalkForwardRunner
             }
         }
 
-        if (winningTraining.Any(w => w is null))
+        if (winningTraining.Any(w => w is null) || fullDatasetWinner is null)
         {
-            Console.Error.WriteLine("No configurations qualified in at least one training fold.");
+            Console.Error.WriteLine("No configurations qualified in at least one selection window.");
             Console.Error.WriteLine("Saved all evaluated configurations: " + gridPath);
             return 2;
         }

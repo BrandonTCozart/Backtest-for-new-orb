@@ -261,30 +261,58 @@ public static class BacktestRunner
             if (move > mfe) { mfe = move; favorablePrice = extreme; }
 
             known.Add(bar.C);
-            // Orb's strategy object is reused. Quotes are unavailable: evaluate stage
-            // changes at each candle close, and make new stops active next minute.
-            for (var step = 0; step < 3; step++)
+            var lockedDollars = ProfitLockLadder.LockedProfitFromFavorablePoints(mfe);
+            if (lockedDollars is decimal lockedProfit)
             {
-                var stage = logic.GetNextStageAction(trade, bar.C.C, range, known);
-                if (stage is null) break;
-                if (stage.DesiredStop is decimal proposed)
+                // The first +$500 activates a stop at +$450. At each further
+                // +$200 favorable step, move it to $50 below the new threshold.
+                // No further original Stage 4/5 adjustments after activation.
+                // Never weaken an existing ORB stop if it was already tighter.
+                var proposed = ProfitLockLadder.StopPriceFromLockedProfit(
+                    price, direction == TradeDirection.Long, lockedProfit);
+                if (trade.ConfirmedStop is not decimal existing ||
+                    logic.IsMoreProtective(direction, proposed, existing))
                 {
-                    proposed = direction == TradeDirection.Long
-                        ? Math.Floor(proposed / OrbStrategy.TickSize) * OrbStrategy.TickSize
-                        : Math.Ceiling(proposed / OrbStrategy.TickSize) * OrbStrategy.TickSize;
-                    // The live worker ignores any stop change that is not more
-                    // protective, before checking whether the proposed stop is valid.
-                    if (trade.ConfirmedStop is not decimal existing ||
-                        logic.IsMoreProtective(direction, proposed, existing))
-                    {
-                        if (!logic.IsValidProtectiveStop(trade, proposed, bar.C.C))
-                            return Build(trade, bars[signal].T.AddMinutes(1), enter, initial.Stop,
-                                bar.T.AddMinutes(1), bar.C.C, "invalid-stop-close", mfe, favorablePrice, day);
-                        trade.ConfirmedStop = proposed;
-                    }
+                    trade.ConfirmedStop = proposed;
+                    // Bar data cannot tell whether a low preceded or followed a
+                    // target-crossing high (or vice versa for shorts). Conservatively
+                    // assume the newly raised stop was triggered within this minute
+                    // if the candle's adverse extreme also crossed it.
+                    var crossedNewStop = direction == TradeDirection.Long
+                        ? bar.C.L <= proposed : bar.C.H >= proposed;
+                    if (crossedNewStop)
+                        return Build(trade, bars[signal].T.AddMinutes(1), enter, initial.Stop,
+                            bar.T.AddMinutes(1), proposed, "ladder-stop-same-bar-assumed",
+                            mfe, favorablePrice, day);
                 }
-                if (stage.Stage == 3 || stage.Stage == 4) logic.CompleteStage(trade, stage);
-                else break;
+            }
+            else
+            {
+                // Original Orb rules apply until the first +$500 favorable move.
+                // Stage changes use candle closes because tick/quote history is
+                // unavailable; the updated stop is active on the next bar.
+                for (var step = 0; step < 3; step++)
+                {
+                    var stage = logic.GetNextStageAction(trade, bar.C.C, range, known);
+                    if (stage is null) break;
+                    if (stage.DesiredStop is decimal proposed)
+                    {
+                        proposed = direction == TradeDirection.Long
+                            ? Math.Floor(proposed / OrbStrategy.TickSize) * OrbStrategy.TickSize
+                            : Math.Ceiling(proposed / OrbStrategy.TickSize) * OrbStrategy.TickSize;
+                        if (trade.ConfirmedStop is not decimal existing ||
+                            logic.IsMoreProtective(direction, proposed, existing))
+                        {
+                            if (!logic.IsValidProtectiveStop(trade, proposed, bar.C.C))
+                                return Build(trade, bars[signal].T.AddMinutes(1), enter, initial.Stop,
+                                    bar.T.AddMinutes(1), bar.C.C, "invalid-stop-close",
+                                    mfe, favorablePrice, day);
+                            trade.ConfirmedStop = proposed;
+                        }
+                    }
+                    if (stage.Stage == 3 || stage.Stage == 4) logic.CompleteStage(trade, stage);
+                    else break;
+                }
             }
 
             if (et == new TimeSpan(15,59,0))

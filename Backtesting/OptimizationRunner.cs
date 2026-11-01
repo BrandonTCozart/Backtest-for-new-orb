@@ -136,7 +136,7 @@ public static class OptimizationRunner
         }
         File.WriteAllLines(holdoutFile, testRows);
 
-        var best = ranked[0];
+        var best = top[0];
         var untouched = OptimizationEngine.Evaluate(best.Config, holdout);
         var full = OptimizationEngine.Evaluate(best.Config, sessions, keepTrades: true);
         var sequence = full.DetailedTrades ?? new List<SimulatedTrade>();

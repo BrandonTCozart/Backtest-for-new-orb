@@ -1,76 +1,53 @@
-# ORB Configuration Optimizer — Visual Studio
+# ORB Walk-Forward Optimizer
 
-Open **`Backtest for new orb.slnx`** and click the green **Play/Start** button. This performs a **recursive, exhaustive search of a deliberately bounded parameter grid** against your existing local ES 1-minute CSV.
+Open **`Backtest for new orb.slnx`** in Visual Studio, pull the latest changes and press **Play**. The default runner is now **expanding-window walk-forward testing**, replacing the old one-time 70/30 holdout. The application uses your existing local ES candles, **without contacting Topstep or placing live orders**. The live `Orb` repository remains unchanged.
 
-It is **completely offline**: no Topstep API calls, no downloading, no user secrets needed, and **no live orders**. The live `Orb` repo is unchanged.
+## Input
 
-## Required input
+Keep either `data/es_1m_3months.csv` (preferred) or `data/es_1m_3months_INCOMPLETE.csv` in the project folder.
 
-Place **`data/es_1m_3months.csv`** in the project folder. If only **`data/es_1m_3months_INCOMPLETE.csv`** is available, that is accepted with a warning. The normal-named CSV is preferred when both exist.
+The file must contain `timestamp_utc,contract,open,high,low,close,volume`. The program requires **at least 20 trading sessions with a complete 9:30–9:45 AM ET opening range**. Missing dates in an incomplete download cannot be inferred.
 
-Expected header: `timestamp_utc,contract,open,high,low,close,volume`.
+## How the walk-forward test works
 
-## What gets optimized
+Sessions are split **chronologically into five consecutive blocks** (the final block can include extra days). The optimizer runs **three expanding-window folds**:
 
-The entry is still based on the original **9:30–9:45 AM ET opening range**, and the first trade is simulated with the original ORB stages, including FVG/reference-level stop logic.
+| Fold | Training data (used to pick configuration) | Following test data (never used to choose it) |
+| --- | --- | --- |
+| 1 | First 40% (blocks 1–2) | Next ~20% (block 3) |
+| 2 | First 60% (blocks 1–3) | Next ~20% (block 4) |
+| 3 | First 80% (blocks 1–4) | Final ~20% (block 5) |
 
-The program recursively evaluates **all 642,816 combinations**: the original 20,736 settings multiplied by **31 selectable weekday combinations**. Instead of running the expensive price simulation 31 times, it reuses each simulated day's trade outcomes for every weekday filter.
+For **each fold**, all **642,816 configurations** are evaluated on its **training** data only. The most profitable *qualifying* training configuration is selected by **net P&L**, with lower closed-trade drawdown and higher first-trade count as tie-breakers. A configuration must have at least `max(4, ceiling(training sessions / 4))` completed ES first trades to qualify.
 
-| Parameter | Tested values |
-| --- | --- |
-| Last eligible breakout signal close (ET) | 10:00, 10:30, 11:00, 16:00 (original no-early-cutoff behavior) |
-| **Allowed trading weekdays (ET)** | **Every nonempty Monday–Friday combination (31)**: all weekdays, any single weekday, pairs, triplets, four-day groups |
-| Opening range width, ES points | unrestricted, 6–25, 10–40 |
-| VWAP filter | off; direction confirmation; direction + 5-minute VWAP slope |
-| Extra breakout close distance past OR boundary | 0, 0.5, 1 ES point |
-| Breakout volume relative to prior 10 completed minutes | off, 1.25× |
-| Entry on retest of OR boundary after breakout | off; on (within five 1-minute candles) |
-| First trade size | **1 or 2 ES** |
-| Total initial-risk cap / fallback stop risk | $600/$500 or $500/$400 |
-| Original Stage 5 ES trailing distance | $150, $250, $350 |
-| Optional Stage 6 size after a losing stopped-out ES trade | **0, 5, 10 or 20 MES** |
+**Only after training selection** is that fold's winner simulated on the immediately following **unseen test block**. The winning settings can differ between folds. Test blocks never overlap, and their P&L is **not used to pick or revise the configurations**.
 
-These combinations are explicitly **bounded**, not an attempt to search literally every real-valued stop setting. The original Stage 3/4 thresholds, Stage 5 activation threshold, and Stage 6 MES stop stages stay as in the `Orb` strategy. **This optimizer does not use or compare the $500/$450 profit-lock system** that was used by the preceding experiment.
+The main result is **combined walk-forward out-of-sample net P&L**, formed by stitching the three test blocks together. A candidate winning on training but losing on later test blocks is explicitly visible; do not interpret the latest settings as proven profitable.
 
-When retest is enabled, the simulator first detects a qualifying breakout, then waits up to five bars for the opening-range boundary to be touched and for price to close outside again.
+The original parameter grid remains unchanged: entry cutoff (10:00, 10:30, 11:00, or 16:00 ET), all 31 nonempty weekday combinations, opening-range width filters, VWAP confirmation, breakout price buffer, relative volume, retest option, two initial-risk configurations, ES Stage-5 trails of $150/$250/$350, first position of **1 or 2 ES**, and optional Stage-6 reversal of **0/5/10/20 MES**.
 
-The weekday filter uses **Eastern Time** trading dates, and a skipped weekday means the strategy **does not enter a first ES trade or Stage 6 MES reversal** on that date. Filtered-out sessions do not count as incomplete/skipped data. An all-weekdays option preserves the previous optimizer behavior. The existing minimum first-ES-trade requirement still applies, so highly selective weekday groups with too few training trades cannot win.
+This runs the original Orb stage-based stop rules, **not** the previously tested $500/$450 profit-lock ladder.
 
-### Important MES limitation
+## Results
 
-**The CSV contains ES candles only.** A Stage 6 MES trade is simulated using the **ES price as a proxy** and the MES $5/point value, with a quantity up to **20 MES**. MES has the same tick size as ES but not necessarily the exact same prices, volume, spreads, or fills. Consequently the MES backtest is a *hypothetical proxy estimate*, **not** a verified MES historical replay. Any configuration whose P&L relies on Stage 6 needs genuine historical MES candles before considering live use.
+The console displays the exact training/test date ranges, the selected configuration and training net P&L for each fold, next-block test net P&L, and the **total stitched out-of-sample net P&L**, costs, trade count, drawdown, and number of profitable test blocks. The **most recent fold's winner** is printed as a potential *candidate*, not a guaranteed strategy for future trading.
 
-All trades include an estimated $10-per-contract cost from the existing `Orb` risk allowance. This may differ significantly from actual commissions and slippage, especially for MES. Risk caps are total position risk, not per-contract risk.
+New CSV/text reports are written to `data`:
 
-## Ranking and protection against overfitting
+- **`optimizer_walk_forward_folds.csv`** — each fold's selected settings, training results, immediately following test results, dates and trade counts.
+- **`optimizer_walk_forward_trades.csv`** — out-of-sample trades only, with fold ID, net P&L, running out-of-sample equity and labeled MES proxies.
+- **`optimizer_walk_forward_monthly_pnl.csv`** — monthly out-of-sample gross/net P&L and running balance.
+- **`optimizer_walk_forward_all_configurations.csv`** — each of the 642,816 configurations with its **training-only** metrics for all three folds. The file is streamed while running and can be large; rows are not sorted by P&L.
+- **`optimizer_walk_forward_summary.txt`** — fold-by-fold results, combined performance and latest selected settings.
 
-The optimizer divides eligible days **chronologically**, before calculating returns:
+Older `optimizer_best_...`, `optimizer_top10_holdout.csv`, and `optimizer_all_configurations.csv` files from previous runs may still exist locally, but the new walk-forward runner **does not update them**.
 
-- First 70% of complete-ORB days: **training**. Every combination is tested, and the most profitable training configuration is selected by **highest simulated net P&L**, subject to a minimum number of first ES trades. Drawdown and trade count are tie breakers.
-- Last 30%: untouched **holdout**. Only the top ten training configurations are evaluated on these days. **Holdout P&L is not used to pick the winner.**
+## Accuracy and limitations
 
-The program displays the **best training configuration**, its exact settings, total training net P&L, drawdown, trade count, and separate holdout performance. It also reports combined-period P&L strictly as descriptive context.
+- ES one-minute OHLC candles do not show quote-by-quote price movement. Market entries are estimated at the next minute's open; stage-based trailing stops update at candle close, and existing stops are assumed touched before favorable wicks in ambiguous candles. Real fills and trading costs may differ.
+- Optional MES Stage-6 trades use ES candles as a **price proxy**, with the MES $5-per-point multiplier; **actual MES prices were not downloaded**. Treat MES P&L as an approximation.
+- Estimated round-trip cost is **$10 per contract**, as in the prior simulation. The reported drawdown is calculated on **closed-trade equity**, not intratrade swings.
+- **Walk-forward helps expose overfitting, but does not eliminate it**. A short dataset and a 642,816-configuration search can still pick lucky settings. Three test blocks over a short period are not proof of future profitability.
+- Each base configuration's daily trade outcomes are computed once and reused for the 31 weekday filters and all three folds. Progress is printed every 100 base configurations. The optimizer may take a long time; stopping early leaves only a partial all-configurations CSV.
 
-**Thousands of strategies tested on only a few weeks of ES history create significant overfitting risk.** Even a good holdout result on such a short period is weak evidence of future profitability. Increase sample coverage and retest before using a candidate with real money.
-
-The winner report now explicitly prints **Allowed trading weekdays (ET)**, and both the all-configurations and top-ten holdout CSVs include the weekday mask and readable weekday names.
-
-## CSV output
-
-All reports go in your local `data` folder:
-
-- **`optimizer_all_configurations.csv`** — all 642,816 tested combinations with weekday mask and names, training P&L, drawdown, number of trades, and eligibility. Rows are streamed in iteration order, not sorted by profit; check the best-configuration report or top-ten results for ranked settings.
-- **`optimizer_top10_holdout.csv`** — the top ten ranked on training results, with corresponding holdout results.
-- **`optimizer_best_trades.csv`** — first ES and any simulated MES trades for the best configuration, including per-trade and running net P&L; labels MES rows `MES_ES_PRICE_PROXY`.
-- **`optimizer_best_monthly_pnl.csv`** — monthly gross P&L, estimated costs, net P&L, cumulative net P&L.
-- **`optimizer_best_configuration.txt`** — human-readable winning parameters and training/holdout breakdown.
-
-Missing bars during an active trade cause it to be excluded. Missing entire dates in an incomplete source cannot be reconstructed.
-
-## One-minute backtest limitations
-
-Entry is assumed at the **next candle's open** after a qualifying signal. Original stop stages react to **candle closes** rather than to individual quote updates as the live worker does. An already-active stop is assumed to trigger first if the same minute also has a favorable wick; gap-through-stop exits use the candle opening price. These are simulation choices, not broker-confirmed fills. Trading costs are fixed estimates.
-
-The recursive grid search may run for an extended period on slower computers. Progress is printed every 100 base configurations (3,100 weekday-filtered variants), and the all-configurations CSV is streamed incrementally. Close the running program or use Visual Studio Stop to cancel. The program writes final reports when all configurations have been evaluated.
-
-**Development status:** These changes were committed to GitHub but have not been compiled or run with your private CSV in this environment.
+**Development status:** The walk-forward changes were committed to GitHub, but they have not been compiled or tested against your local CSV here.

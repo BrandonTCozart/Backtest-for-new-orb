@@ -14,11 +14,11 @@ Expected header: `timestamp_utc,contract,open,high,low,close,volume`.
 
 The entry is still based on the original **9:30–9:45 AM ET opening range**, and the first trade is simulated with the original ORB stages, including FVG/reference-level stop logic.
 
-The program recursively evaluates **all 15,552 combinations** of the following choices:
+The program recursively evaluates **all 20,736 combinations** of the following choices:
 
 | Parameter | Tested values |
 | --- | --- |
-| Last eligible breakout signal close (ET) | 10:00, 10:30, 11:00 |
+| Last eligible breakout signal close (ET) | 10:00, 10:30, 11:00, 16:00 (original no-early-cutoff behavior) |
 | Opening range width, ES points | unrestricted, 6–25, 10–40 |
 | VWAP filter | off; direction confirmation; direction + 5-minute VWAP slope |
 | Extra breakout close distance past OR boundary | 0, 0.5, 1 ES point |
@@ -54,7 +54,7 @@ The program displays the **best training configuration**, its exact settings, to
 
 All reports go in your local `data` folder:
 
-- **`optimizer_all_configurations.csv`** — all 15,552 tested combinations with settings, training P&L, drawdown, number of trades, and eligibility.
+- **`optimizer_all_configurations.csv`** — all 20,736 tested combinations with settings, training P&L, drawdown, number of trades, and eligibility.
 - **`optimizer_top10_holdout.csv`** — the top ten ranked on training results, with corresponding holdout results.
 - **`optimizer_best_trades.csv`** — first ES and any simulated MES trades for the best configuration, including per-trade and running net P&L; labels MES rows `MES_ES_PRICE_PROXY`.
 - **`optimizer_best_monthly_pnl.csv`** — monthly gross P&L, estimated costs, net P&L, cumulative net P&L.

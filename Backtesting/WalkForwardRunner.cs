@@ -16,7 +16,7 @@ public static class WalkForwardRunner
 
     public static int Run()
     {
-        Console.WriteLine("ORB WALK-FORWARD OPTIMIZER (expanding training window)");
+        Console.WriteLine("ORB FULL-DATASET OPTIMIZER + WALK-FORWARD TEST");
         Console.WriteLine("Using original Orb stage stops, not the $500/$450 experiment.");
         Console.WriteLine("Only local ES candles; no Topstep access or live orders.");
         Console.WriteLine("Caps: first position 1-2 ES; optional reversal 0-20 MES (ES price proxy).");
@@ -59,7 +59,7 @@ public static class WalkForwardRunner
         }
         Console.WriteLine("Evaluating " +
             (BaseCombinationCount * WeekdaySubsetCount * EconomicRuleCount).ToString("N0", CI) +
-            " configurations on EACH of 3 training windows.");
+            " configurations on EACH of 3 training windows AND the full dataset.");
         Console.WriteLine("Daily trade paths are reused across weekdays, event policies and folds.");
         Console.WriteLine("Event policies: Off; skip major release days; skip 30m before/15m after intraday releases; skip FOMC decision day and prior trading day.");
         Console.WriteLine("No future test-period P&L is used to select configurations.");
@@ -195,13 +195,13 @@ public static class WalkForwardRunner
             "fold_number,training_start_et,training_end_et,training_sessions,minimum_training_es_trades,test_start_et,test_end_et,test_sessions,selected_config_id,training_net_pnl,training_es_trades,training_mes_proxy_trades,training_max_drawdown,test_net_pnl,test_gross_pnl,test_estimated_costs,test_es_trades,test_mes_proxy_trades,test_winning_trades,test_max_closed_drawdown,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts,economic_event_rule,full_sample_net_pnl,full_sample_es_trades,full_sample_mes_proxy_trades,full_sample_wins,full_sample_max_closed_drawdown"
         };
         var summary = new List<string> {
-            "ORB WALK-FORWARD RESULTS — original stage stops; no $500/$450 profit lock",
+            "ORB FULL-DATASET OPTIMIZER + WALK-FORWARD RESULTS",
             "Dataset: " + Path.GetFileName(csvPath),
             "Full eligible session range: " + sessions[0].Day + " through " + sessions[^1].Day,
             "Method: expanding-window train, select on training P&L only, test immediately following dates",
             "Config grid: " + evaluated.ToString("N0", CI) + " distinct configurations, trained 3 times each",
             "Economic rules: Off / AvoidMajorReleaseDay / AvoidIntradayReleaseWindow / AvoidFomcDayAndPriorTradingDay",
-            "This is not a single winner tuned against one holdout period.",
+            "Full-grid best-overall selection and three fold-training winners are evaluated separately.",
             ""
         };
 

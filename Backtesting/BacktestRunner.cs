@@ -20,7 +20,8 @@ public static class BacktestRunner
 
     public static int Run()
     {
-        Console.WriteLine("ORB first-trade backtest: Maximum Favorable Excursion (MFE)");
+        Console.WriteLine("ORB first ES trade: $500 profit-lock ladder backtest");
+        Console.WriteLine("At +$500 lock +$450; at +$700 lock +$650; at +$900 lock +$850; etc.");
         Console.WriteLine("Local CSV only; no download, Topstep login or orders.");
         var root = FindRoot();
         var dir = Path.Combine(root, "data");
@@ -63,21 +64,56 @@ public static class BacktestRunner
             {
                 trades.Add(result);
                 Console.WriteLine(day.ToString("yyyy-MM-dd", CI) + ": " + result.Direction +
-                    ", MFE " + result.MfePoints.ToString("0.00", CI) + " pts, exit=" + result.ExitReason);
+                    ", net P&L " + (result.RealizedPoints * PointValue - CostAllowance).ToString("+0.00;-0.00;0.00", CI) +
+                    " USD, MFE " + result.MfePoints.ToString("0.00", CI) + " pts, exit=" + result.ExitReason);
             }
         }
 
         Directory.CreateDirectory(dir);
-        var tradesFile = Path.Combine(dir, "backtest_first_trade_mfe.csv");
+        var tradesFile = Path.Combine(dir, "backtest_first_trade_500_lock_pnl.csv");
+        var monthlyFile = Path.Combine(dir, "backtest_monthly_500_lock_pnl.csv");
         var skipsFile = Path.Combine(dir, "backtest_skipped_days.csv");
-        File.WriteAllLines(tradesFile, new [] {
-            "date_et,contract,direction,signal_time_et,entry_time_et,entry_price,initial_stop,exit_time_et,exit_price,exit_reason,mfe_points,mfe_dollars,favorable_extreme,realized_points,realized_dollars,final_stage"
-        }.Concat(trades.Select(t => string.Join(",",
-            t.Day.ToString("yyyy-MM-dd", CI), t.Contract, t.Direction,
-            FormatEt(t.SignalAt), FormatEt(t.EnteredAt), F(t.Entry), F(t.FirstStop),
-            FormatEt(t.ExitedAt), F(t.Exit), t.ExitReason, F(t.MfePoints),
-            F(t.MfePoints * PointValue), F(t.FavorablePrice), F(t.RealizedPoints),
-            F(t.RealizedPoints * PointValue), t.FinalStage.ToString(CI)))));
+        var cumulativeNet = 0m;
+        var tradeRows = new List<string> {
+            "date_et,contract,direction,signal_time_et,entry_time_et,entry_price,initial_stop,exit_time_et,exit_price,exit_reason,target_500_reached,highest_ladder_lock_dollars,mfe_points,mfe_dollars,favorable_extreme,realized_points,gross_pnl_dollars,estimated_cost_dollars,net_pnl_dollars,cumulative_net_pnl_dollars,final_stage"
+        };
+        foreach (var t in trades.OrderBy(x => x.Day))
+        {
+            var gross = t.RealizedPoints * PointValue;
+            var net = gross - CostAllowance;
+            cumulativeNet += net;
+            var locked = ProfitLockLadder.LockedProfitFromFavorablePoints(t.MfePoints);
+            tradeRows.Add(string.Join(",",
+                t.Day.ToString("yyyy-MM-dd", CI), t.Contract, t.Direction,
+                FormatEt(t.SignalAt), FormatEt(t.EnteredAt), F(t.Entry), F(t.FirstStop),
+                FormatEt(t.ExitedAt), F(t.Exit), t.ExitReason,
+                locked is not null ? "true" : "false",
+                locked is decimal lp ? F(lp) : "",
+                F(t.MfePoints), F(t.MfePoints * PointValue), F(t.FavorablePrice),
+                F(t.RealizedPoints), F(gross), F(CostAllowance), F(net),
+                F(cumulativeNet), t.FinalStage.ToString(CI)));
+        }
+        File.WriteAllLines(tradesFile, tradeRows);
+        var monthlyNet = 0m;
+        var monthlyRows = new List<string> {
+            "month_et,trades,wins,losses,gross_pnl_dollars,estimated_cost_dollars,net_pnl_dollars,cumulative_net_pnl_dollars,target_reached_count"
+        };
+        foreach (var month in trades.GroupBy(t => (t.Day.Year, t.Day.Month))
+                     .OrderBy(g => g.Key.Year).ThenBy(g => g.Key.Month))
+        {
+            var g = month.ToArray();
+            var gross = g.Sum(t => t.RealizedPoints * PointValue);
+            var costs = g.Length * CostAllowance;
+            var net = gross - costs;
+            monthlyNet += net;
+            monthlyRows.Add(string.Join(",",
+                month.Key.Year.ToString("D4", CI) + "-" + month.Key.Month.ToString("D2", CI),
+                g.Length, g.Count(t => t.RealizedPoints * PointValue - CostAllowance > 0),
+                g.Count(t => t.RealizedPoints * PointValue - CostAllowance < 0),
+                F(gross), F(costs), F(net), F(monthlyNet),
+                g.Count(t => ProfitLockLadder.LockedProfitFromFavorablePoints(t.MfePoints) != null)));
+        }
+        File.WriteAllLines(monthlyFile, monthlyRows);
         File.WriteAllLines(skipsFile, new [] { "date_et,reason" }.Concat(skips.Select(s =>
             s.Day.ToString("yyyy-MM-dd", CI) + ",\"" + s.Why.Replace("\"", "\"\"") + "\"")));
 
@@ -90,24 +126,44 @@ public static class BacktestRunner
             Console.WriteLine("No completed trades; see " + skipsFile);
             return 2;
         }
-        var m = trades.Select(t => t.MfePoints).OrderBy(x => x).ToArray();
-        var avg = m.Average();
-        var median = m.Length % 2 == 1 ? m[m.Length/2] : (m[m.Length/2-1] + m[m.Length/2]) / 2m;
-        Console.WriteLine("AVERAGE MAXIMUM FAVORABLE MOVE: " + F(avg) + " ES points, $" +
-            (avg * PointValue).ToString("N2", CI) + " for one ES contract");
-        Console.WriteLine("Median MFE: " + F(median) + " points; range: " + F(m[0]) + "–" + F(m[^1]));
+        var grossTotal = trades.Sum(t => t.RealizedPoints * PointValue);
+        var estimatedCosts = trades.Count * CostAllowance;
+        var netTotal = grossTotal - estimatedCosts;
+        var wins = trades.Count(t => t.RealizedPoints * PointValue - CostAllowance > 0);
+        var losses = trades.Count(t => t.RealizedPoints * PointValue - CostAllowance < 0);
+        var peakEquity = 0m;
+        var runningEquity = 0m;
+        var worstDrawdown = 0m;
+        foreach (var t in trades.OrderBy(t => t.Day))
+        {
+            runningEquity += t.RealizedPoints * PointValue - CostAllowance;
+            peakEquity = Math.Max(peakEquity, runningEquity);
+            worstDrawdown = Math.Max(worstDrawdown, peakEquity - runningEquity);
+        }
+        Console.WriteLine("TOTAL GROSS P&L: $" + grossTotal.ToString("N2", CI));
+        Console.WriteLine("ESTIMATED ROUND-TRIP COSTS: $" + estimatedCosts.ToString("N2", CI));
+        Console.WriteLine("TOTAL NET P&L: $" + netTotal.ToString("N2", CI));
+        Console.WriteLine("Winning trades: " + wins + "; losing trades: " + losses +
+            "; net win rate: " + (100m * wins / trades.Count).ToString("0.0", CI) + "%");
+        Console.WriteLine("Average net P&L per trade: $" + (netTotal/trades.Count).ToString("N2", CI));
+        Console.WriteLine("Max closed-trade equity drawdown: $" + worstDrawdown.ToString("N2", CI));
+        Console.WriteLine("Trades reaching +$500: " +
+            trades.Count(t => ProfitLockLadder.LockedProfitFromFavorablePoints(t.MfePoints) is not null));
+        Console.WriteLine("Average MFE: " +
+            trades.Average(t => t.MfePoints).ToString("0.00", CI) + " ES points");
         foreach (var side in new[] { TradeDirection.Long, TradeDirection.Short })
         {
             var group = trades.Where(t => t.Direction == side).ToArray();
             if (group.Length > 0)
-                Console.WriteLine(side + ": " + group.Length + " trades, average MFE " +
-                    F(group.Average(t => t.MfePoints)) + " points");
+                Console.WriteLine(side + ": " + group.Length + " trades, net P&L $" +
+                    group.Sum(t => t.RealizedPoints * PointValue - CostAllowance).ToString("N2", CI));
         }
-        Console.WriteLine("Per-trade results: " + tradesFile);
+        Console.WriteLine("Per-trade and cumulative P&L: " + tradesFile);
+        Console.WriteLine("Monthly P&L: " + monthlyFile);
         Console.WriteLine("Skipped sessions: " + skipsFile);
-        Console.WriteLine("Method: next-minute open entry, 1-minute candle extremes for MFE,");
-        Console.WriteLine("old stop checked before favorable wick in ambiguous stop-hit minutes,");
-        Console.WriteLine("and stage changes at candle close (not tick-perfect).");
+        Console.WriteLine("Simulation: ORB stages before +$500; quote-driven rules approximated with 1-minute bars.");
+        Console.WriteLine("At +$500 and each additional +$200, lock $50 below that threshold.");
+        Console.WriteLine("Existing protective stops are never loosened. Assumes $10 round-trip cost per ES.");
         return 0;
     }
 

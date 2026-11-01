@@ -41,9 +41,9 @@ public static class OptimizationEngine
         }
     }
 
-    // For each base parameter set, compute daily trade paths once across the
-    // chronological dataset, then aggregate all 31 weekday subsets for each
-    // TRAINING window. Test windows are never passed to the scoring aggregate.
+    // Daily trade paths are simulated once for each base configuration.
+    // Each event policy and weekday combination only re-aggregates them,
+    // preserving chronological fold boundaries and preventing lookahead.
     public static IEnumerable<(int FoldIndex, OptimizationResult Score)>
         EvaluateWalkForwardTrainingVariants(
             OptimizationConfig baseConfig,
@@ -52,19 +52,24 @@ public static class OptimizationEngine
     {
         Validate(baseConfig);
         var outcomes = ComputeDayOutcomes(baseConfig, sessions);
-        for (var mask = 1; mask <= WeekdaySelection.All; mask++)
+        foreach (var rule in Enum.GetValues<EconomicEventRule>())
         {
-            var candidate = baseConfig with
+            for (var mask = 1; mask <= WeekdaySelection.All; mask++)
             {
-                WeekdayMask = mask,
-                Id = checked((baseConfig.Id - 1) * WeekdaySelection.All + mask)
-            };
-            for (var foldIndex = 0; foldIndex < folds.Count; foldIndex++)
-            {
-                var fold = folds[foldIndex];
-                yield return (foldIndex,
-                    AggregateRange(candidate, outcomes, fold.TrainingStart,
-                        fold.TrainingEnd, keepTrades: false));
+                var candidate = baseConfig with
+                {
+                    WeekdayMask = mask,
+                    EventRule = rule,
+                    Id = checked(((baseConfig.Id - 1) * WeekdaySelection.All +
+                        (mask - 1)) * 4 + (int)rule + 1)
+                };
+                for (var foldIndex = 0; foldIndex < folds.Count; foldIndex++)
+                {
+                    var fold = folds[foldIndex];
+                    yield return (foldIndex,
+                        AggregateRange(candidate, outcomes, fold.TrainingStart,
+                            fold.TrainingEnd, keepTrades: false));
+                }
             }
         }
     }
@@ -142,8 +147,12 @@ public static class OptimizationEngine
                 result.SkippedDays++;
                 continue;
             }
+            if (!EconomicCalendar.AllowsEntry(config.EventRule, day.Day, day.First.EntryAt))
+                continue; // The calendar filter excludes this entry on this date.
             Accumulate(day.First);
-            if (day.Reversal is not null) Accumulate(day.Reversal);
+            if (day.Reversal is not null &&
+                EconomicCalendar.AllowsEntry(config.EventRule, day.Day, day.Reversal.EntryAt))
+                Accumulate(day.Reversal);
         }
         return result;
 

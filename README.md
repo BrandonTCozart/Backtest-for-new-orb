@@ -22,7 +22,12 @@ For **each fold**, all **2,571,264 configurations** are evaluated on its **train
 
 **Only after training selection** is that fold's winner simulated on the immediately following **unseen test block**. The winning settings can differ between folds. Test blocks never overlap, and their P&L is **not used to pick or revise the configurations**.
 
-The main result is **combined walk-forward out-of-sample net P&L**, formed by stitching the three test blocks together. The report shows the training winner and its subsequent test-block performance side by side.
+The report now shows **two separate P&L views**:
+
+- **Overall/full-dataset P&L:** Replays each fold's selected configuration, unchanged, over *all* available complete opening-range sessions, including its training dates. Each of the three selected configurations gets an independent full-sample P&L, trade counts and closed-trade drawdown. **Do not add the three full-dataset totals** because their date ranges overlap completely.
+- **Walk-forward out-of-sample P&L:** Stitches the three immediately following test blocks together, applying the configuration selected for *each* fold. The three test blocks do not overlap.
+
+For each fold, the console prints its **same-configuration full-dataset P&L** directly under that fold's next-block test P&L. After all folds, a **FULL-DATASET RESULTS** section shows all three full-sample totals side by side with their corresponding test-block P&L and highlights the most recently selected configuration's overall result.
 
 The original entry/exit parameter grid remains unchanged: entry cutoff (10:00, 10:30, 11:00, or 16:00 ET), all 31 nonempty weekday combinations, opening-range width filters, VWAP confirmation, breakout price buffer, relative volume, retest option, two initial-risk configurations, ES Stage-5 trails of $150/$250/$350, first position of **1 or 2 ES**, and optional Stage-6 reversal of **0/5/10/20 MES**.
 
@@ -51,7 +56,10 @@ The console displays the exact training/test date ranges, the selected configura
 
 New CSV/text reports are written to `data`:
 
-- **`optimizer_walk_forward_folds.csv`** — each fold's selected settings, training results, immediately following test results, dates and trade counts.
+- **`optimizer_walk_forward_folds.csv`** — each fold's selected settings, training results, immediately following test results, dates, trade counts, and full-dataset comparison metrics.
+- **`optimizer_full_sample_comparison.csv`** — three rows, one per selected fold winner, with the fixed configuration's **full-dataset** net P&L, fees, trades, wins, drawdown, and its corresponding next-block test P&L.
+- **`optimizer_full_sample_latest_config_trades.csv`** — every trade taken by the most recent fold winner when replayed across the *entire* dataset, including cumulative net P&L and its chronological period.
+
 - **`optimizer_economic_calendar_2026.csv`** — official historical release schedule used by the optimizer.
 - **`optimizer_walk_forward_trades.csv`** — out-of-sample trades only, with fold ID, net P&L, running out-of-sample equity and labeled MES proxies.
 - **`optimizer_walk_forward_monthly_pnl.csv`** — monthly out-of-sample gross/net P&L and running balance.

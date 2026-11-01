@@ -177,6 +177,26 @@ public static class TradePatternAnalyzer
         }
         File.WriteAllLines(comparisonsFile, comparisonRows);
 
+        // A dedicated economic-event breakdown stays visible even when the
+        // sample is too small to appear in the general top-four comparison.
+        var eventPerformancePath = Path.Combine(folder, "optimizer_economic_event_performance.csv");
+        var economicResults = comparisons.Where(x =>
+            x.Name is "Any major economic release day" or "CPI release day" or
+            "Employment report / NFP release day" or "FOMC decision day" or
+            "Day before FOMC decision" or
+            "FOMC decision within 3 calendar days" or "PCE release day" or
+            "Scheduled 10 AM ET economic release day").ToArray();
+        var eventLines = new List<string> {
+            "economic_context,trades_with,wins_with,losses_with,loss_rate_with_pct,avg_net_with_dollars,trades_without,wins_without,losses_without,loss_rate_without_pct,avg_net_without_dollars,unknown"
+        };
+        foreach (var e in economicResults)
+            eventLines.Add(string.Join(",", Csv(e.Name),
+                e.YesCount, e.YesWins, e.YesLosses,
+                Maybe(e.YesLossRate), Maybe(e.YesAverageNet),
+                e.NoCount, e.NoWins, e.NoLosses,
+                Maybe(e.NoLossRate), Maybe(e.NoAverageNet), e.Unknown));
+        File.WriteAllLines(eventPerformancePath, eventLines);
+
         var winners = records.Count(r => r.Trade.Net > 0m);
         var losers = records.Count - winners;
         var baseline = records.Count == 0 ? 0m : 100m * losers / records.Count;
@@ -216,6 +236,11 @@ public static class TradePatternAnalyzer
         else foreach (var r in lesser) summary.Add("  " + FormatComparison(r));
 
         summary.Add("");
+        summary.Add("ECONOMIC EVENT PERFORMANCE (wins and losses for both event and non-event days):");
+        foreach (var r in economicResults)
+            summary.Add("  " + FormatComparison(r));
+        summary.Add("");
+        summary.Add("Economic event comparison CSV: " + Path.GetFileName(eventPerformancePath));
         summary.Add("ALL conditions (including overlaps, near-neutral and small-sample results): " +
             Path.GetFileName(comparisonsFile));
         summary.Add("Entry-only measurements for every test ES trade: " +
@@ -237,6 +262,11 @@ public static class TradePatternAnalyzer
             if (!string.IsNullOrEmpty(line)) Console.WriteLine(line);
         }
         Console.WriteLine("Each row reports BOTH winners and losers satisfying the condition.");
+        Console.WriteLine();
+        Console.WriteLine("ECONOMIC EVENT PERFORMANCE (same selected walk-forward trades)");
+        foreach (var e in economicResults)
+            Console.WriteLine(FormatComparison(e));
+        Console.WriteLine("Economic comparisons: " + eventPerformancePath);
         Console.WriteLine("Pattern comparisons: " + comparisonsFile);
         Console.WriteLine("Trade observations: " + observationsFile);
         Console.WriteLine("Pattern summary: " + summaryFile);

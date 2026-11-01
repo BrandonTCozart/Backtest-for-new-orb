@@ -12,68 +12,119 @@ public static class OptimizationEngine
         bool Mes, decimal RiskCap, decimal Fallback, decimal EsTrail);
     private static readonly Dictionary<TradeKey, SimulatedTrade?> TradeCache = new();
 
+    private sealed record DayOutcome(DateOnly Day, SimulatedTrade? First, SimulatedTrade? Reversal);
+
     public static OptimizationResult Evaluate(
         OptimizationConfig config, IReadOnlyList<SessionData> sessions,
         bool keepTrades = false)
     {
+        Validate(config);
+        return Aggregate(config, ComputeDayOutcomes(config, sessions), keepTrades);
+    }
+
+    // Simulate the expensive intraday entry/stop logic only ONCE per base
+    // configuration. Then test every weekday subset by cheaply filtering
+    // the already-computed daily trades in their original date order.
+    // This makes 31 weekday subsets practical without rerunning 31x trades.
+    public static IEnumerable<OptimizationResult> EvaluateWeekdayVariants(
+        OptimizationConfig baseConfig, IReadOnlyList<SessionData> sessions)
+    {
+        Validate(baseConfig);
+        var outcomes = ComputeDayOutcomes(baseConfig, sessions);
+        for (var mask = 1; mask <= WeekdaySelection.All; mask++)
+        {
+            var candidate = baseConfig with {
+                WeekdayMask = mask,
+                Id = checked((baseConfig.Id - 1) * WeekdaySelection.All + mask)
+            };
+            yield return Aggregate(candidate, outcomes, keepTrades: false);
+        }
+    }
+
+    private static void Validate(OptimizationConfig config)
+    {
         if (config.EsQuantity is < 1 or > 2 || config.MesQuantity is < 0 or > 20)
             throw new ArgumentOutOfRangeException(nameof(config),
                 "Optimizer position caps: 1–2 ES; 0–20 MES.");
-        var result = new OptimizationResult { Config = config };
-        if (keepTrades) result.DetailedTrades = new List<SimulatedTrade>();
-        decimal balance = 0m, maxBalance = 0m;
+        if (config.WeekdayMask is < 1 or > WeekdaySelection.All)
+            throw new ArgumentOutOfRangeException(nameof(config),
+                "Weekdays must be a non-empty combination of Monday–Friday.");
+    }
+
+    private static List<DayOutcome> ComputeDayOutcomes(
+        OptimizationConfig config, IReadOnlyList<SessionData> sessions)
+    {
+        var outcomes = new List<DayOutcome>(sessions.Count);
         var logic = new OrbStrategy { EsTrailingDistance = config.EsTrailDollars };
 
-        foreach (var s in sessions)
+        foreach (var session in sessions)
         {
-            var firstEntry = FindFirstEntry(s, config);
-            if (firstEntry is null)
+            var signal = FindFirstEntry(session, config);
+            if (signal is not { } entry)
             {
-                result.SkippedDays++;
+                outcomes.Add(new DayOutcome(session.Day, null, null));
                 continue;
             }
 
-            var (signalIndex, side) = firstEntry.Value;
-            var first = SimulateCached(s, logic, signalIndex, side, config.EsQuantity,
-                isMes: false, config.Risk.MaxRisk, config.Risk.FallbackRisk,
+            var first = SimulateCached(session, logic, entry.SignalIndex,
+                entry.Side, config.EsQuantity, isMes: false,
+                config.Risk.MaxRisk, config.Risk.FallbackRisk,
                 config.EsTrailDollars);
-            if (first is null)
-            {
-                result.SkippedDays++;
-                continue;
-            }
-            Accumulate(first);
 
-            if (config.MesQuantity > 0 && first.Stopped && first.Net < 0m)
+            SimulatedTrade? reversal = null;
+            if (first is not null && config.MesQuantity > 0 &&
+                first.Stopped && first.Net < 0m)
             {
-                var reversal = FindStage6Entry(s, first);
-                if (reversal is { } entry)
+                var second = FindStage6Entry(session, first);
+                if (second is { } resignal)
                 {
-                    // ES OHLC is only a price proxy for MES; true MES bars are
-                    // unavailable in the user's saved ES-only dataset.
-                    var mes = SimulateCached(s, logic, entry.SignalIndex, entry.Side,
-                        config.MesQuantity, isMes: true,
+                    // MES trades are ES-candle PRICE PROXIES, not real MES bars.
+                    reversal = SimulateCached(session, logic, resignal.SignalIndex,
+                        resignal.Side, config.MesQuantity, isMes: true,
                         OrbStrategy.Stage6MaxInitialRisk,
-                        OrbStrategy.Stage6DefaultInitialStopRisk, config.EsTrailDollars);
-                    if (mes is not null) Accumulate(mes);
+                        OrbStrategy.Stage6DefaultInitialStopRisk,
+                        config.EsTrailDollars);
                 }
             }
+            outcomes.Add(new DayOutcome(session.Day, first, reversal));
         }
+        return outcomes;
+    }
 
+    private static OptimizationResult Aggregate(
+        OptimizationConfig config, IReadOnlyList<DayOutcome> days, bool keepTrades)
+    {
+        var result = new OptimizationResult { Config = config };
+        if (keepTrades) result.DetailedTrades = new List<SimulatedTrade>();
+        decimal balance = 0m, peak = 0m;
+
+        foreach (var day in days)
+        {
+            if (!WeekdaySelection.Includes(config.WeekdayMask, day.Day.DayOfWeek))
+                continue; // Excluded weekdays do NOT count as skipped sessions.
+
+            if (day.First is null)
+            {
+                result.SkippedDays++;
+                continue;
+            }
+            Accumulate(day.First);
+            if (day.Reversal is not null) Accumulate(day.Reversal);
+        }
         return result;
 
-        void Accumulate(SimulatedTrade t)
+        void Accumulate(SimulatedTrade trade)
         {
-            if (t.IsMes) result.MesTrades++;
+            if (trade.IsMes) result.MesTrades++;
             else result.EsTrades++;
-            result.Gross += t.Gross;
-            result.Costs += t.EstimatedCosts;
-            result.Net += t.Net;
-            if (t.Net > 0) result.WinningTrades++;
-            balance += t.Net;
-            maxBalance = Math.Max(maxBalance, balance);
-            result.MaxDrawdown = Math.Max(result.MaxDrawdown, maxBalance - balance);
-            result.DetailedTrades?.Add(t);
+            result.Gross += trade.Gross;
+            result.Costs += trade.EstimatedCosts;
+            result.Net += trade.Net;
+            if (trade.Net > 0) result.WinningTrades++;
+            balance += trade.Net;
+            peak = Math.Max(peak, balance);
+            result.MaxDrawdown = Math.Max(result.MaxDrawdown, peak - balance);
+            result.DetailedTrades?.Add(trade);
         }
     }
 

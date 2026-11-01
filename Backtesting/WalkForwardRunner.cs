@@ -341,6 +341,25 @@ public static class WalkForwardRunner
 
         var latestConfig = winningTraining[^1]!.Config;
         var latestFull = fullSampleResults[^1];
+        var fullBest = OptimizationEngine.Evaluate(fullDatasetWinner!.Config,
+            sessions, keepTrades: true);
+
+        Console.WriteLine();
+        Console.WriteLine("BEST OVERALL CONFIGURATION (optimized across ALL " +
+            sessions.Length + " opening-range sessions)");
+        Console.WriteLine("Selected from " + evaluated.ToString("N0", CI) +
+            " configurations; " + eligibleFullCount.ToString("N0", CI) +
+            " met the minimum " + minimumFullSampleTrades + " ES trades.");
+        Console.WriteLine("Config " + fullBest.Config.Id +
+            ": FULL DATASET NET P&L $" + F(fullBest.Net) +
+            "; gross $" + F(fullBest.Gross) +
+            "; costs $" + F(fullBest.Costs));
+        Console.WriteLine("Trades: " + fullBest.EsTrades + " ES, " +
+            fullBest.MesTrades + " MES proxy; wins " +
+            fullBest.WinningTrades + "; maximum closed-trade drawdown $" +
+            F(fullBest.MaxDrawdown));
+        foreach (var line in HumanSettings(fullBest.Config).Split("; "))
+            Console.WriteLine(line);
 
         Console.WriteLine();
         Console.WriteLine("FULL-DATASET RESULTS (one fixed configuration per row)");
@@ -357,7 +376,11 @@ public static class WalkForwardRunner
         }
         Console.WriteLine("WALK-FORWARD OOS TOTAL (different selected configs in different folds): $" +
             F(runningNet));
-        Console.WriteLine("LATEST SELECTED CONFIG FULL-DATASET NET P&L: $" + F(latestFull.Net) +
+        Console.WriteLine("BEST OVERALL ACROSS FULL GRID: config " + fullBest.Config.Id +
+            ", net $" + F(fullBest.Net) +
+            ", " + fullBest.EsTrades + " ES trades");
+        Console.WriteLine("LATEST FOLD-3 TRAINING WINNER ON FULL DATASET: config " +
+            latestConfig.Id + ", net $" + F(latestFull.Net) +
             " (" + latestFull.EsTrades + " ES trades, " +
             latestFull.MesTrades + " MES proxy trades)");
         Console.WriteLine("Full-dataset results include the training dates; walk-forward OOS excludes those dates.");
@@ -367,6 +390,18 @@ public static class WalkForwardRunner
         foreach (var entry in HumanSettings(latestConfig).Split("; "))
             Console.WriteLine(entry);
 
+        summary.Add("BEST OVERALL CONFIGURATION — selected on all " +
+            sessions.Length + " available opening-range sessions");
+        summary.Add("Full-dataset grid winner: config " + fullBest.Config.Id);
+        summary.Add("FULL DATASET NET P&L: $" + F(fullBest.Net) +
+            "; gross $" + F(fullBest.Gross) + "; costs $" + F(fullBest.Costs));
+        summary.Add("Trades: " + fullBest.EsTrades + " ES, " + fullBest.MesTrades +
+            " MES proxy; wins " + fullBest.WinningTrades +
+            "; max closed-trade drawdown $" + F(fullBest.MaxDrawdown));
+        summary.Add("Minimum eligible ES trades: " + minimumFullSampleTrades +
+            "; qualifying full-dataset configurations: " + eligibleFullCount);
+        summary.Add(HumanSettings(fullBest.Config));
+        summary.Add("");
         summary.Add("COMBINED OUT-OF-SAMPLE NET P&L (stitched fold test blocks): $" + F(runningNet));
         summary.Add("FULL-DATASET RESULTS (separate fixed-config replays):");
         for (var i = 0; i < folds.Length; i++)
@@ -416,6 +451,45 @@ public static class WalkForwardRunner
         }
         File.WriteAllLines(latestFullTradesPath, latestTradeRows);
 
+        // Trade-by-trade report for the actual overall optimized winner,
+        // which is selected from the full grid rather than the fold winners.
+        decimal optimalRunning = 0m;
+        var optimalTradeRows = new List<string> {
+            "date_et,instrument,source_contract,quantity,direction,entry_time_et,entry_price,exit_time_et,exit_price,exit_reason,mfe_points,gross_pnl_dollars,estimated_cost_dollars,net_pnl_dollars,cumulative_full_net_pnl_dollars"
+        };
+        foreach (var trade in fullBest.DetailedTrades ?? [])
+        {
+            optimalRunning += trade.Net;
+            optimalTradeRows.Add(string.Join(",",
+                Day(trade.Date), trade.IsMes ? "MES_ES_PRICE_PROXY" : "ES",
+                trade.Contract, trade.Quantity.ToString(CI), trade.Direction,
+                Et(trade.EntryAt), F(trade.Entry), Et(trade.ExitAt), F(trade.Exit),
+                trade.ExitReason, F(trade.MfePoints), F(trade.Gross),
+                F(trade.EstimatedCosts), F(trade.Net), F(optimalRunning)));
+        }
+        File.WriteAllLines(optimalFullTradesPath, optimalTradeRows);
+
+        File.WriteAllLines(optimalFullSummaryPath, new[] {
+            "BEST OVERALL FULL-DATASET CONFIGURATION",
+            "Dataset: " + Path.GetFileName(csvPath),
+            "Available opening-range sessions: " + sessions.Length,
+            "Dates: " + sessions[0].Day + " through " + sessions[^1].Day,
+            "Configurations evaluated: " + evaluated,
+            "Qualifying configurations: " + eligibleFullCount,
+            "Minimum ES trade count to qualify: " + minimumFullSampleTrades,
+            "Winning config ID: " + fullBest.Config.Id,
+            "FULL-DATASET NET P&L: $" + F(fullBest.Net),
+            "Gross: $" + F(fullBest.Gross) +
+                "; estimated costs: $" + F(fullBest.Costs),
+            "ES trades: " + fullBest.EsTrades +
+                "; MES proxy trades: " + fullBest.MesTrades +
+                "; winning trades: " + fullBest.WinningTrades,
+            "Max closed-trade drawdown: $" + F(fullBest.MaxDrawdown),
+            HumanSettings(fullBest.Config),
+            "Walk-forward OOS P&L (separately selected fold winners): $" +
+                F(runningNet)
+        });
+
         // Diagnostic only: compare entry-time conditions for wins AND losses.
         // No patterns are fed back into optimizer selection or test P&L.
         summary.AddRange(TradePatternAnalyzer.Analyze(
@@ -423,12 +497,14 @@ public static class WalkForwardRunner
         File.WriteAllLines(summaryPath, summary);
 
         Console.WriteLine();
+        Console.WriteLine("Full-grid optimal configuration: " + optimalFullSummaryPath);
+        Console.WriteLine("Full-grid optimal trades: " + optimalFullTradesPath);
         Console.WriteLine("Full-dataset comparison: " + fullComparisonPath);
         Console.WriteLine("Latest config full-dataset trades: " + latestFullTradesPath);
         Console.WriteLine("Fold results: " + foldsPath);
         Console.WriteLine("Out-of-sample trades: " + tradesPath);
         Console.WriteLine("Out-of-sample monthly P&L: " + monthsPath);
-        Console.WriteLine("All configuration training scores by fold: " + gridPath);
+        Console.WriteLine("All configuration fold and full-dataset scores: " + gridPath);
         Console.WriteLine("Walk-forward summary and latest settings: " + summaryPath);
         return 0;
     }

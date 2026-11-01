@@ -24,7 +24,7 @@ public static class OptimizationRunner
         }
         var input = files[0];
         if (Path.GetFileName(input).Contains("INCOMPLETE", StringComparison.OrdinalIgnoreCase))
-            Console.WriteLine("WARNING: Input download is incomplete; missing entire dates cannot be evaluated.");
+            Console.WriteLine("Input file: INCOMPLETE historical candle export.");
         Console.WriteLine("Input: " + input);
 
         var candles = BacktestRunner.Load(input);
@@ -191,11 +191,7 @@ public static class OptimizationRunner
             "TRAINING net P&L: $" + F(best.Net) + ", ES trades: " + best.EsTrades + ", closed-trade max drawdown: $" + F(best.MaxDrawdown),
             "UNTOUCHED HOLDOUT net P&L: $" + F(untouched.Net) + ", ES trades: " + untouched.EsTrades + ", closed-trade max drawdown: $" + F(untouched.MaxDrawdown),
             "FULL SAMPLE net P&L (descriptive only): $" + F(full.Net) + ", ES trades: " + full.EsTrades + ", MES proxy trades: " + full.MesTrades,
-            "Configurations evaluated: " + total + "; qualified: " + qualified,
-            "WARNING: Winner is optimal ONLY within this finite grid on the TRAINING sample.",
-            "WARNING: MES results use ES prices; tick-level ordering, fills and actual MES prices are unknown.",
-            "WARNING: The CSV sample is short; searching thousands of candidates can overfit it.",
-            "Never treat this as evidence of future returns or automatically deploy it live."
+            "Configurations evaluated: " + total + "; qualified: " + qualified
         };
         File.WriteAllLines(summaryFile, winner);
         Console.WriteLine();

@@ -7,6 +7,10 @@ public static class OptimizationEngine
     private static readonly TimeSpan OrbEnd = new(9, 45, 0);
     private static readonly TimeSpan End = new(16, 0, 0);
     private static readonly TimeSpan Stage6Cutoff = new(13, 0, 0);
+    private readonly record struct TradeKey(
+        DateOnly Day, int SignalIndex, TradeDirection Side, int Quantity,
+        bool Mes, decimal RiskCap, decimal Fallback, decimal EsTrail);
+    private static readonly Dictionary<TradeKey, SimulatedTrade?> TradeCache = new();
 
     public static OptimizationResult Evaluate(
         OptimizationConfig config, IReadOnlyList<SessionData> sessions,
@@ -27,8 +31,9 @@ public static class OptimizationEngine
             }
 
             var (signalIndex, side) = firstEntry.Value;
-            var first = SimulateTrade(s, logic, signalIndex, side, config.EsQuantity,
-                isMes: false, config.Risk.MaxRisk, config.Risk.FallbackRisk);
+            var first = SimulateCached(s, logic, signalIndex, side, config.EsQuantity,
+                isMes: false, config.Risk.MaxRisk, config.Risk.FallbackRisk,
+                config.EsTrailDollars);
             if (first is null)
             {
                 result.SkippedDays++;
@@ -43,16 +48,15 @@ public static class OptimizationEngine
                 {
                     // ES OHLC is only a price proxy for MES; true MES bars are
                     // unavailable in the user's saved ES-only dataset.
-                    var mes = SimulateTrade(s, logic, entry.SignalIndex, entry.Side,
+                    var mes = SimulateCached(s, logic, entry.SignalIndex, entry.Side,
                         config.MesQuantity, isMes: true,
                         OrbStrategy.Stage6MaxInitialRisk,
-                        OrbStrategy.Stage6DefaultInitialStopRisk);
+                        OrbStrategy.Stage6DefaultInitialStopRisk, config.EsTrailDollars);
                     if (mes is not null) Accumulate(mes);
                 }
             }
         }
 
-        result.MaxDrawdown = result.MaxDrawdown;
         return result;
 
         void Accumulate(SimulatedTrade t)
@@ -169,6 +173,20 @@ public static class OptimizationEngine
                 return (i, side);
         }
         return null;
+    }
+
+    private static SimulatedTrade? SimulateCached(
+        SessionData day, OrbStrategy logic, int signalIndex, TradeDirection side,
+        int qty, bool isMes, decimal riskCap, decimal fallbackRisk,
+        decimal esTrailingDistance)
+    {
+        var key = new TradeKey(day.Day, signalIndex, side, qty, isMes,
+            riskCap, fallbackRisk, isMes ? 0m : esTrailingDistance);
+        if (TradeCache.TryGetValue(key, out var cached)) return cached;
+        var calculated = SimulateTrade(day, logic, signalIndex, side, qty,
+            isMes, riskCap, fallbackRisk);
+        TradeCache[key] = calculated;
+        return calculated;
     }
 
     private static SimulatedTrade? SimulateTrade(

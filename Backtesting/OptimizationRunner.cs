@@ -256,7 +256,7 @@ public static class OptimizationRunner
         F(c.VolumeMultiplier), c.Retest ? "yes" : "no",
         c.EsQuantity.ToString(CI), F(c.Risk.MaxRisk),
         F(c.Risk.FallbackRisk), F(c.EsTrailDollars),
-        c.MesQuantity.ToString(CI));
+        c.MesQuantity.ToString(CI), c.EventRule);
     private static string F(decimal value) => value.ToString("0.00", CI);
     private static string Et(DateTimeOffset time) => Orb.MarketTime.ToEastern(time)
         .ToString("yyyy-MM-ddTHH:mm:sszzz", CI);

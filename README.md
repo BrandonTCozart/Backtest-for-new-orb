@@ -22,7 +22,7 @@ For **each fold**, all **2,571,264 configurations** are evaluated on its **train
 
 **Only after training selection** is that fold's winner simulated on the immediately following **unseen test block**. The winning settings can differ between folds. Test blocks never overlap, and their P&L is **not used to pick or revise the configurations**.
 
-The main result is **combined walk-forward out-of-sample net P&L**, formed by stitching the three test blocks together. A candidate winning on training but losing on later test blocks is explicitly visible; do not interpret the latest settings as proven profitable.
+The main result is **combined walk-forward out-of-sample net P&L**, formed by stitching the three test blocks together. The report shows the training winner and its subsequent test-block performance side by side.
 
 The original entry/exit parameter grid remains unchanged: entry cutoff (10:00, 10:30, 11:00, or 16:00 ET), all 31 nonempty weekday combinations, opening-range width filters, VWAP confirmation, breakout price buffer, relative volume, retest option, two initial-risk configurations, ES Stage-5 trails of $150/$250/$350, first position of **1 or 2 ES**, and optional Stage-6 reversal of **0/5/10/20 MES**.
 
@@ -47,7 +47,7 @@ This runs the original Orb stage-based stop rules, **not** the previously tested
 
 ## Results
 
-The console displays the exact training/test date ranges, the selected configuration and training net P&L for each fold, next-block test net P&L, and the **total stitched out-of-sample net P&L**, costs, trade count, drawdown, and number of profitable test blocks. The **most recent fold's winner** is printed as a potential *candidate*, not a guaranteed strategy for future trading.
+The console displays the exact training/test date ranges, the selected configuration and training net P&L for each fold, next-block test net P&L, and the **total stitched out-of-sample net P&L**, costs, trade count, drawdown, and number of profitable test blocks. The **most recent fold's winner** is also printed with its settings.
 
 New CSV/text reports are written to `data`:
 
@@ -69,7 +69,6 @@ Once the three walk-forward test blocks finish, the program examines **only the 
 Pre-entry metrics read **only the completed breakout signal candle and earlier 1-minute candles** (the entry bar's future high/low/close is never inspected); missing contiguous-bar history yields a blank measurement rather than a fabricated value. MES reversal price-proxy trades are excluded from the ES first-trade statistics and explicitly counted as excluded.
 
 The console highlights up to four conditions with higher observed loss rates and four with lower rates when each comparison side has at least five trades. It separately prints all economic-calendar comparisons, including small groups. The full CSV includes every predefined condition. The diagnostic does not alter the optimizer or its trade outcomes.
-
 
 
 Older `optimizer_best_...`, `optimizer_top10_holdout.csv`, and `optimizer_all_configurations.csv` files from previous runs may still exist locally, but the new walk-forward runner **does not update them**.

@@ -1,42 +1,50 @@
 # Backtest-for-new-orb
 
-A **read-only** .NET 10 command-line downloader that uses the same TopstepX API as [Orb](https://github.com/BrandonTCozart/Orb). Downloads the previous **3 calendar months** of 1-minute **ES** (E-mini S&P 500, not MES) OHLCV candles and exports a single CSV.
+A **Visual Studio 2022 .NET 10 console app** that downloads the previous **3 calendar months of 1-minute ES (E-mini S&P 500) candles** from TopstepX into a CSV. Open the solution and press **Start (green Play arrow)**. No terminal or command line required.
 
-## Security first
+## First-time setup (inside Visual Studio)
 
-**Rotate your Topstep API key immediately.** The original Orb repository currently has an API key hard-coded in `TopstepModels.cs`, and that repository is public. Removing the key from the latest commit does not remove its exposure in Git history. This downloader never stores credentials in source control and cannot place orders.
+1. Open **`Backtest-for-new-orb.sln`** in Visual Studio.
+2. In **Solution Explorer**, right-click the **Backtest-for-new-orb project** (not the solution) and choose **Manage User Secrets**.
+3. Replace the contents of the `secrets.json` editor with the following, using your *own newly rotated* API credentials:
 
-## Run (PowerShell)
-
-Requires .NET 10 SDK and your own TopstepX API access.
-
-```powershell
-$env:TOPSTEP_USERNAME="your-topstep-username"
-$env:TOPSTEP_API_KEY="your-new-api-key"
-dotnet run --project Backtest-for-new-orb.csproj -- --output data/es_1m_3months.csv
+```json
+{
+  "Topstep": {
+    "UserName": "YOUR_TOPSTEP_LOGIN",
+    "ApiKey": "YOUR_NEW_TOPSTEP_API_KEY"
+  }
+}
 ```
 
-To specify exact start/end times in UTC:
+4. Save the secrets file. Set the **Backtest-for-new-orb** project as the startup project if Visual Studio asks. Choose the **Download 3 Months ES CSV** launch profile and click the **green Start arrow** (or press **F5**).
 
-```powershell
-dotnet run -- --start 2026-08-01T00:00:00Z --end 2026-11-01T00:00:00Z --output data/es_aug_oct.csv
+That's it: **each subsequent Start downloads a fresh trailing 3-month CSV automatically**. You do not need to use PowerShell or supply arguments. Console progress appears while downloading.
+
+The output appears in the solution folder at:
+
+```text
+data/es_1m_3months.csv
 ```
 
-The program will try `/api/Contract/search` for the quarterly ES contracts and allow explicit Topstep contract IDs when expired ones cannot be looked up:
+The CSV columns are: `timestamp_utc,contract,open,high,low,close,volume`.
 
-```powershell
-dotnet run -- --contract ESU6=ACTUAL_ESU6_ID --contract ESZ6=ACTUAL_ESZ6_ID
-```
+For development, Visual Studio stores user secrets on your PC, not in the GitHub repository. The downloader also accepts existing `TOPSTEP_USERNAME` and `TOPSTEP_API_KEY` environment variables as an alternative.
 
-Contract IDs must come from your Topstep account, not guessed IDs.
+## Security warning
 
-## How it works
+The original [Orb](https://github.com/BrandonTCozart/Orb) repo was publicly visible with a **hard-coded API key** in `TopstepModels.cs`. **Revoke that key and generate a new one immediately**; removing it from the latest source alone does not remove it from Git history. Never paste the real key into this repository or `launchSettings.json`.
 
-- Authenticates through `/api/Auth/loginKey` using environment variables.
-- Fetches 1-minute candles from `/api/History/retrieveBars` in seven-day windows, under the request limit of 20,000 candles.
-- Uses an **approximate calendar-based quarterly roll** eight calendar days before the contract's third-Friday expiration. The resulting file is *not* back-adjusted continuous futures data.
-- Deduplicates overlapping minute timestamps and sorts results ascending.
-- Writes `timestamp_utc,contract,open,high,low,close,volume` to a CSV excluded from Git.
-- Logs API errors and empty windows. By default it refuses to write a CSV after such errors; `--allow-partial` enables knowingly incomplete CSV output.
+## What the downloader does
 
-**Historical access is not guaranteed**: Topstep may restrict expired-contract candles or older minute data. The program cannot prove there are no missing individual minutes inside otherwise nonempty windows. Confirm session completeness and rolls before running a serious backtest. This has not been run against your Topstep account by ChatGPT.
+- Logs in to TopstepX with `/api/Auth/loginKey`, based on the existing `Orb` integration.
+- Uses `/api/Contract/search` to resolve ES quarterly futures contracts.
+- Fetches 1-minute OHLCV candles via `/api/History/retrieveBars` in 7-day requests, under the 20,000-bar limit.
+- Changes contracts at a **calendar-based approximation** of rollover (eight days before each quarterly contract's third-Friday expiration), not an exchange-provided or volume-based continuous series.
+- Sorts bars chronologically and deduplicates minutes.
+- Logs retrieval errors and refuses to write a misleading CSV if a request fails or returns an empty window. A previously generated CSV is not changed in that case. `--allow-partial` exists for advanced troubleshooting only.
+- Makes **no trading/order requests**.
+
+**Data coverage caveats:** Some expired contracts may not resolve through the API, and Topstep may not supply three months of 1-minute history. The program will report unresolved symbols; the exact contract ID can be supplied with `--contract ESU6=ID` if needed. Empty windows are flagged, but an individual missing minute inside a nonempty window is not automatically detected. Closed market sessions are normal. The stitched CSV is not back-adjusted. Validate rollover and gap coverage before relying on the backtest.
+
+The code has been committed, but it has **not** been built or authenticated against your Topstep account here.

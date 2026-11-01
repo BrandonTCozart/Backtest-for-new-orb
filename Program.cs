@@ -2,11 +2,24 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Globalization;
+using Microsoft.Extensions.Configuration;
 
-var user = Environment.GetEnvironmentVariable("TOPSTEP_USERNAME");
-var key = Environment.GetEnvironmentVariable("TOPSTEP_API_KEY");
+// Visual Studio: right-click this project -> Manage User Secrets once.
+// Thereafter the green Start button downloads a fresh 3-month CSV on every run.
+var secrets = new ConfigurationBuilder()
+    .AddUserSecrets("Backtest-for-new-orb-8a3c73df-6ef8-4900-a244-253948c8e72d")
+    .Build();
+var user = Environment.GetEnvironmentVariable("TOPSTEP_USERNAME") ?? secrets["Topstep:UserName"];
+var key = Environment.GetEnvironmentVariable("TOPSTEP_API_KEY") ?? secrets["Topstep:ApiKey"];
 if (string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(key))
-    throw new Exception("Set TOPSTEP_USERNAME and TOPSTEP_API_KEY environment variables.");
+{
+    Console.Error.WriteLine("Topstep credentials are missing.");
+    Console.Error.WriteLine("In Visual Studio: right-click Backtest-for-new-orb -> Manage User Secrets.");
+    Console.Error.WriteLine("Add JSON with Topstep:UserName and Topstep:ApiKey, save, and press Start again.");
+    Console.Error.WriteLine("Do not put API keys in GitHub or launchSettings.json.");
+    return 1;
+}
+Console.WriteLine("Starting Topstep ES 1-minute historical download from Visual Studio.");
 var from = DateTimeOffset.UtcNow.AddMonths(-3);
 var to = DateTimeOffset.UtcNow;
 var output = "data/es_1m_3months.csv";

@@ -146,6 +146,7 @@ public static class WalkForwardRunner
         // Evaluate winners on held-out NEXT blocks only AFTER ALL folds' training
         // winners have been chosen. These out-of-sample results select nothing.
         var combinedOutOfSampleTrades = new List<(int FoldNumber, SimulatedTrade Trade)>();
+        var testNetByFold = new decimal[folds.Length];
         var foldReports = new List<string> {
             "fold_number,training_start_et,training_end_et,training_sessions,minimum_training_es_trades,test_start_et,test_end_et,test_sessions,selected_config_id,training_net_pnl,training_es_trades,training_mes_proxy_trades,training_max_drawdown,test_net_pnl,test_gross_pnl,test_estimated_costs,test_es_trades,test_mes_proxy_trades,test_winning_trades,test_max_closed_drawdown,entry_cutoff_et,weekday_mask,weekdays,orb_min_points,orb_max_points,vwap_rule,breakout_buffer_points,volume_multiplier,retest_required,es_contracts,max_es_initial_risk,es_fallback_stop_risk,stage5_es_trail_dollars,stage6_mes_contracts"
         };
@@ -169,6 +170,7 @@ public static class WalkForwardRunner
                 .Skip(fold.TestStart).Take(fold.TestSessions).ToArray();
             var test = OptimizationEngine.Evaluate(chosen.Config,
                 testingSessions, keepTrades: true);
+            testNetByFold[i] = test.Net;
             foreach (var trade in test.DetailedTrades ?? [])
                 combinedOutOfSampleTrades.Add((fold.Number, trade));
 
@@ -251,11 +253,7 @@ public static class WalkForwardRunner
         var allCosts = sequenced.Sum(x => x.Trade.EstimatedCosts);
         var won = sequenced.Count(x => x.Trade.Net > 0);
         var lost = sequenced.Count(x => x.Trade.Net < 0);
-        var positiveFolds = foldReports.Count == 0 ? 0 :
-            folds.Select((fold, i) => OptimizationEngine.Evaluate(
-                winningTraining[i]!.Config,
-                sessions.Skip(fold.TestStart).Take(fold.TestSessions).ToArray()))
-                .Count(result => result.Net > 0);
+        var positiveFolds = testNetByFold.Count(net => net > 0m);
 
         Console.WriteLine();
         Console.WriteLine("TOTAL WALK-FORWARD OUT-OF-SAMPLE NET P&L: $" + F(runningNet));

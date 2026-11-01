@@ -216,12 +216,16 @@ public static class BacktestRunner
                     proposed = direction == TradeDirection.Long
                         ? Math.Floor(proposed / OrbStrategy.TickSize) * OrbStrategy.TickSize
                         : Math.Ceiling(proposed / OrbStrategy.TickSize) * OrbStrategy.TickSize;
-                    if (!logic.IsValidProtectiveStop(trade, proposed, bar.C.C))
-                        return Build(trade, bars[signal].T.AddMinutes(1), enter, initial.Stop,
-                            bar.T.AddMinutes(1), bar.C.C, "invalid-stop-close", mfe, favorablePrice, day);
+                    // The live worker ignores any stop change that is not more
+                    // protective, before checking whether the proposed stop is valid.
                     if (trade.ConfirmedStop is not decimal existing ||
                         logic.IsMoreProtective(direction, proposed, existing))
+                    {
+                        if (!logic.IsValidProtectiveStop(trade, proposed, bar.C.C))
+                            return Build(trade, bars[signal].T.AddMinutes(1), enter, initial.Stop,
+                                bar.T.AddMinutes(1), bar.C.C, "invalid-stop-close", mfe, favorablePrice, day);
                         trade.ConfirmedStop = proposed;
+                    }
                 }
                 if (stage.Stage == 3 || stage.Stage == 4) logic.CompleteStage(trade, stage);
                 else break;

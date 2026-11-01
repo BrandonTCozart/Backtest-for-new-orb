@@ -39,6 +39,19 @@ New CSV/text reports are written to `data`:
 - **`optimizer_walk_forward_monthly_pnl.csv`** — monthly out-of-sample gross/net P&L and running balance.
 - **`optimizer_walk_forward_all_configurations.csv`** — each of the 642,816 configurations with its **training-only** metrics for all three folds. The file is streamed while running and can be large; rows are not sorted by P&L.
 - **`optimizer_walk_forward_summary.txt`** — fold-by-fold results, combined performance and latest selected settings.
+- **`optimizer_trade_pattern_observations.csv`** — one row per walk-forward **ES first trade**, listing date, winner/loser label and pre-entry opening range, breakout strength, signal-candle shape, relative volume, ATR, prior candle-range ratio, VWAP alignment, five-minute direction, and entry timing; exit reason and MFE are outcome-only descriptive fields.
+- **`optimizer_trade_pattern_comparisons.csv`** — for each predefined condition, the number of **winning and losing** trades both **with and without** the condition, their respective loss rates, average P&L, percentage-point difference, missing-data count, and a minimum-sample flag.
+- **`optimizer_trade_pattern_summary.txt`** — readable higher- and lower-loss-rate associations, with explicit warnings about small samples and overfitting.
+
+### Trade-pattern analysis (automatically follows the optimizer)
+
+Once the three walk-forward test blocks finish, the program examines **only the out-of-sample ES first trades** to describe *which conditions occurred more often in losing trades than winning trades*. It checks weekdays, entry timing, trade direction, OR width, breakout distance, signal-bar body and close location, relative signal volume and candle range, 14-minute ATR, VWAP alignment, and the preceding five minutes' price direction. It also reports the **opposite** group, so it never assumes a condition is loss-specific: a condition might appear in both winners and losers, or in too few trades to be useful.
+
+Pre-entry metrics read **only the completed breakout signal candle and earlier 1-minute candles** (the entry bar's future high/low/close is never inspected); missing contiguous-bar history yields a blank measurement rather than a fabricated value. MES reversal price-proxy trades are excluded from the ES first-trade statistics and explicitly counted as excluded.
+
+The console highlights up to four criteria with higher observed loss rates and four with lower rates **only when each comparison side has at least five trades**. The full comparison CSV includes all conditions, including zero/low-support ones. This support threshold is **not** a significance test. The diagnostic doesn't change the strategy, optimize a new filter, or modify the walk-forward P&L.
+
+**Important:** Looking for patterns in the out-of-sample test labels makes those dates useful for *exploration*, but **not untouched for later testing of newly developed rules**. Test any changes motivated by these patterns on *fresh, later historical data* instead of claiming the old walk-forward periods independently confirm the new rules.
 
 Older `optimizer_best_...`, `optimizer_top10_holdout.csv`, and `optimizer_all_configurations.csv` files from previous runs may still exist locally, but the new walk-forward runner **does not update them**.
 
@@ -50,4 +63,4 @@ Older `optimizer_best_...`, `optimizer_top10_holdout.csv`, and `optimizer_all_co
 - **Walk-forward helps expose overfitting, but does not eliminate it**. A short dataset and a 642,816-configuration search can still pick lucky settings. Three test blocks over a short period are not proof of future profitability.
 - Each base configuration's daily trade outcomes are computed once and reused for the 31 weekday filters and all three folds. Progress is printed every 100 base configurations. The optimizer may take a long time; stopping early leaves only a partial all-configurations CSV.
 
-**Development status:** The walk-forward changes were committed to GitHub, but they have not been compiled or tested against your local CSV here.
+**Development status:** The trade-pattern diagnostic changes are committed to GitHub, but this environment has not compiled or executed them against your local ES CSV.

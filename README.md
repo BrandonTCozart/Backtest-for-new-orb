@@ -1,60 +1,43 @@
 # Backtest-for-new-orb
 
-A **Visual Studio 2022 .NET 10 console app** that downloads the previous **3 calendar months of 1-minute ES (E-mini S&P 500) candles** from TopstepX into a CSV. Open the solution and press **Start (green Play arrow)**. No terminal or command line required.
+Run a **local 1-minute ES ORB backtest** by opening **`Backtest for new orb.slnx`** in Visual Studio and pressing the green **Start** button. The app **does not download data, contact Topstep, require user secrets, or place trades**.
 
-## First-time setup (inside Visual Studio)
+## Input
 
-1. Open **`Backtest for new orb.slnx`** in Visual Studio.
-2. In **Solution Explorer**, right-click the **Backtest for new orb project** (not the solution) and choose **Manage User Secrets**.
-3. Replace the contents of the `secrets.json` editor with the following, using your *own newly rotated* API credentials:
+Put the previously downloaded CSV in your local project folder's `data` directory:
 
-```json
-{
-  "Topstep": {
-    "UserName": "YOUR_TOPSTEP_LOGIN",
-    "ApiKey": "YOUR_NEW_TOPSTEP_API_KEY"
-  }
-}
-```
+- `data/es_1m_3months.csv`, or
+- `data/es_1m_3months_INCOMPLETE.csv`
 
-4. Save the secrets file. Set the **Backtest for new orb** project as the startup project if Visual Studio asks. Choose the **Download 3 Months ES CSV** launch profile and click the **green Start arrow** (or press **F5**).
+If both exist, the most recently modified file is used. The CSV header must be `timestamp_utc,contract,open,high,low,close,volume`. The downloaded candles are gitignored: they will stay on your PC, not in GitHub. If the program cannot find the file, its console output displays the expected folder. No login or credentials are required.
 
-That's it: **each subsequent Start downloads a fresh trailing 3-month CSV automatically**. You do not need to use PowerShell or supply arguments. Console progress appears while downloading.
+## What is tested
 
-The output appears in the solution folder at:
+The **first ES trade per available trading day**, using the original `Orb` strategy code copied into `Backtesting/OrbStrategy.cs`:
 
-```text
-data/es_1m_3months.csv
-```
+1. Create the opening range from all 15 minute candles, **9:30–9:45 AM Eastern**.
+2. Find the first candle **closing above OR high (long)** or **below OR low (short)**. Approximate a market fill at the **next candle's opening price**; skip days where the opening bar is missing.
+3. Trade **one ES contract**. Calculate the initial stop with the same 75%-OR stop, $600 max estimated initial risk, and $500 fallback as `Orb`. The calculation uses the same $10 commission/slippage risk allowance.
+4. Simulate the original Stages **3, 4 and 5**, reference levels, FVG-related stop adjustments, and stop-loss exits. This backtest **excludes the optional MES Stage 6 reversal trade**.
+5. Close remaining positions at **4:00 PM ET**.
 
-The CSV columns are: `timestamp_utc,contract,open,high,low,close,volume`.
+**Metric: Maximum Favorable Excursion (MFE)** means the maximum price movement in the trade's favor **between its entry and exit**, even if price subsequently reverses. For a long, it is the highest favorable high minus entry; for a short, entry minus the lowest favorable low. A trade that never moves in favor has **0** MFE. All completed first trades, including losing trades, are included in the average.
 
-For development, Visual Studio stores user secrets on your PC, not in the GitHub repository. The downloader also accepts existing `TOPSTEP_USERNAME` and `TOPSTEP_API_KEY` environment variables as an alternative.
+One ES point is **$50** for one contract, so the console prints average MFE in **points and equivalent dollars**, plus median, minimum/maximum and averages for long/short trades.
 
-## Security warning
+## Outputs (written automatically)
 
-The original [Orb](https://github.com/BrandonTCozart/Orb) repo was publicly visible with a **hard-coded API key** in `TopstepModels.cs`. **Revoke that key and generate a new one immediately**; removing it from the latest source alone does not remove it from Git history. Never paste the real key into this repository or `launchSettings.json`.
+- `data/backtest_first_trade_mfe.csv` — one row for every completed first trade, with signal/entry/exit timestamps, prices, exit reason, MFE points, MFE dollars, actual exit price, realized points, and last stage reached.
+- `data/backtest_skipped_days.csv` — sessions without a valid completed trade (missing bars, missing full opening range, no breakout, etc.).
 
-## What the downloader does
+## Important simulation limitations
 
-- Logs in to TopstepX with `/api/Auth/loginKey`, based on the existing `Orb` integration.
-- Resolves ES quarterly futures contracts using `/api/Contract/searchById` first (including inactive expired IDs such as `CON.F.US.EP.U26`), then falls back to `/api/Contract/search`. The ID is verified as an ES contract before use.
-- Fetches 1-minute OHLCV candles via `/api/History/retrieveBars` in 7-day requests, under the 20,000-bar limit.
-- Changes contracts at a **calendar-based approximation** of rollover (eight days before each quarterly contract's third-Friday expiration), not an exchange-provided or volume-based continuous series.
-- Sorts bars chronologically and deduplicates minutes.
-- Logs retrieval errors. If a request fails or returns an empty window, the app writes any retrieved candles to `data/es_1m_3months_INCOMPLETE.csv` instead of falsely labeling them as complete, and returns an error. A previously generated complete CSV remains unchanged. `--allow-partial` exists for advanced troubleshooting only.
-- Makes **no trading/order requests**.
+- The original live `Orb` worker evaluates stops and trade stages from **individual quote updates**, but the downloaded history is **only 1-minute OHLCV**. This simulator uses **candle-close checks to adjust stops**, which become active on the next minute. Consequently it can produce different exits than live trading. It is a **bar-level approximation**, not a tick-perfect execution replay.
+- When a protective stop is touched anywhere within a candle, the simulator conservatively assumes that the stop executes **before that candle's favorable high/low**. It counts any favorable opening gap but excludes the unknown intrabar favorable wick. If the candle opens beyond a stop, it uses the opening price as the simulated stop fill. Prices, fills, latency, fees, and slippage may differ from live execution.
+- A downloaded file named `INCOMPLETE` is still accepted, but analysis covers **only the available sessions**. Missing 1-minute data during a trade causes that day to be skipped; missing entire dates cannot be detected from a file alone. Missing premarket/prior-day history can prevent reference levels from being available.
+- Contract rollovers are taken from the **contract labels in your original CSV**; the data is not back-adjusted.
+- The CSV is a study of trade movement, **not a profit forecast or investment recommendation**.
 
-**Data coverage caveats:** Expired contracts may resolve successfully through the API but Topstep may no longer supply their 1-minute bars. Independent ProjectX client documentation reports that its gateway does not retain sub-hour history for expired contract months. The program must actually fetch and verify the bars; successful contract ID resolution alone is not proof of three-month data availability. The program will report unresolved symbols; the exact contract ID can be supplied with `--contract ESU6=ID` if needed. Empty windows are flagged, but an individual missing minute inside a nonempty window is not automatically detected. Closed market sessions are normal. The stitched CSV is not back-adjusted. Validate rollover and gap coverage before relying on the backtest.
+This app preserves the original `Orb` repository unchanged and never places trades.
 
-The code has been committed, but it has **not** been built or authenticated against your Topstep account here.
-
-
-## Why ESU6 was missing
-
-The first run downloaded ESZ6 but `/api/Contract/search` did not return ESU6. The program now tries the documented `/api/Contract/searchById` operation first with the ES contract ID convention, verifying the returned contract name and symbol. No manual ID entry is required for this attempt. If it resolves but the history endpoint returns no 1-minute bars, that is a provider data limitation rather than a login problem. The program does **not** label an incomplete history as a complete three-month CSV.
-
-Sources:
-- https://gateway.docs.projectx.com/docs/api-reference/market-data/search-contracts-by-id/
-- https://gateway.docs.projectx.com/docs/api-reference/market-data/retrieve-bars/
-- https://texascoding.github.io/project-x-py/api/client.html#contract-rolls-and-gateway-limits
+**Development status:** The source was committed to GitHub; it has not been compiled or executed with your local candle CSV by ChatGPT.

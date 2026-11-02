@@ -1,10 +1,35 @@
 # ORB Full-Dataset Optimizer + Walk-Forward Test
 
-Open **`Backtest for new orb.slnx`** in Visual Studio, pull the latest changes and press **Play**. The default runner is now **expanding-window walk-forward testing**, replacing the old one-time 70/30 holdout. The application uses your existing local ES candles, **without contacting Topstep or placing live orders**. The live `Orb` repository remains unchanged.
+Open **`Backtest for new orb.slnx`** in Visual Studio, pull the latest changes and press **Play**. Startup **downloads the available TopstepX ES 1-minute candle history to a new CSV first**, then runs the existing full-dataset optimization and expanding-window walk-forward tests. All the existing optimizer and reporting functionality remains. The live `Orb` trading repository remains unchanged.
+
+## Automatically download TopstepX 1-minute ES history
+
+**One-time credential setup (Visual Studio):** right-click the backtest **project** → **Manage User Secrets** and put the following in `secrets.json` (using your own current TopstepX API credentials):
+
+```json
+{
+  "Topstep": {
+    "UserName": "YOUR_TOPSTEPX_LOGIN",
+    "ApiKey": "YOUR_TOPSTEPX_API_KEY"
+  }
+}
+```
+
+Alternatively set the Windows user environment variables `TOPSTEP_USERNAME` and `TOPSTEP_API_KEY`. User Secrets and environment variables are kept outside this repository. Do not put API keys in committed source files.
+
+Every time you press **Start**, the downloader authenticates to the ProjectX/TopstepX API and saves/updates `data/es_1m_max_available.csv`. It uses the **read-only** `/api/Contract/available` and `/api/History/retrieveBars` endpoints; it cannot place or modify orders. It requests one-minute OHLCV history for successive quarterly ES contracts, in 12-day windows (under the API's 20,000-bars-per-request maximum), respects rate limits, merges existing candles and retains a single ES contract per Eastern trading day.
+
+The **first successful download scans backward through historical quarters**, ending after eight consecutive quarters without retrievable minute data (or the beginning of ES contract history). Because TopstepX may not retain expired-contract one-minute history, the actual oldest date depends on the API. Subsequent starts refresh the latest candles; delete `data/es_1m_max_available.backfill-complete` to force a full historical rescan. The downloader prints dates, candle counts and which contracts supplied data.
+
+The original `data/es_1m_3months.csv` file remains unchanged. The optimizer **prefers the new `es_1m_max_available.csv`**, falling back to the original CSV if history downloading is unavailable. If credentials are not configured, the downloader prints setup instructions and still runs the existing backtest on the local CSV.
+
+TopstepX API references: [Retrieve historical bars](https://gateway.docs.projectx.com/docs/api-reference/market-data/retrieve-bars/) · [Rate limits](https://gateway.docs.projectx.com/docs/getting-started/rate-limits/).
+
+
 
 ## Input
 
-Keep either `data/es_1m_3months.csv` (preferred) or `data/es_1m_3months_INCOMPLETE.csv` in the project folder.
+The downloader produces `data/es_1m_max_available.csv` (preferred). The existing `data/es_1m_3months.csv` and `data/es_1m_3months_INCOMPLETE.csv` are still supported as fallback inputs; neither is overwritten.
 
 The file must contain `timestamp_utc,contract,open,high,low,close,volume`. The program requires **at least 20 trading sessions with a complete 9:30–9:45 AM ET opening range**. Missing dates in an incomplete download cannot be inferred.
 
@@ -94,4 +119,4 @@ Older `optimizer_best_...`, `optimizer_top10_holdout.csv`, and `optimizer_all_co
 - The event-calendar policies are applied without using release outcomes, and train/test date boundaries remain chronological.
 - Each base configuration's daily trade outcomes are computed once and reused for the 31 weekday filters and four economic-event policies and all three folds. Progress is printed every 100 base configurations. The optimizer may take a long time; stopping early leaves only a partial all-configurations CSV.
 
-**Development status:** Full-dataset selection and walk-forward evaluation are committed to GitHub. The local ES CSV is not available in this environment, and compilation/execution have not been verified here.
+**Development status:** Automatic historical-download startup, full-dataset optimization and walk-forward evaluation are committed to GitHub. An authenticated TopstepX account and local .NET build are required to verify the actual available history; this environment has not executed the download or build.

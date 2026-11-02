@@ -22,7 +22,7 @@ public static class WalkForwardRunner
         Console.WriteLine("Caps: first position 1-2 ES; optional reversal 0-20 MES (ES price proxy).");
 
         var directory = Path.Combine(BacktestRunner.FindRoot(), "data");
-        var files = new[] { "es_1m_3months.csv", "es_1m_3months_INCOMPLETE.csv" }
+        var files = new[] { TopstepHistoryDownloader.OutputName, "es_1m_3months.csv", "es_1m_3months_INCOMPLETE.csv" }
             .Select(filename => Path.Combine(directory, filename))
             .Where(File.Exists).ToArray();
         if (files.Length == 0)

@@ -4,7 +4,9 @@ Open **`Backtest for new orb.slnx`** in Visual Studio, pull the latest changes a
 
 ## Automatically download TopstepX 1-minute ES history
 
-**One-time credential setup (Visual Studio):** right-click the backtest **project** → **Manage User Secrets** and put the following in `secrets.json` (using your own current TopstepX API credentials):
+**Credentials:** The backtester now automatically reads the **existing Orb project's Visual Studio User Secrets store**, as well as any secrets configured specifically for the backtester. **If your Orb credentials are already in its `secrets.json`, you do not need to re-enter them.** It does not copy any credentials into GitHub.
+
+If you want separate backtest credentials instead, right-click the backtest project → **Manage User Secrets** and use:
 
 ```json
 {

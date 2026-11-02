@@ -117,33 +117,8 @@ internal sealed class TopstepHistoryDownloader : IDisposable
                 ? active.Id : generatedId;
             if (!seenIds.Add(contractId)) continue;
 
-            // Contract/searchById is supported for inactive contracts when
-            // available. If an old quarter is unavailable, simply try the next.
-            if (!string.Equals(contractId, active.Id, StringComparison.OrdinalIgnoreCase))
-            {
-                try
-                {
-                    var lookup = await PostAsync("/api/Contract/searchById",
-                        new { contractId }, cancellationToken, allowBusinessFailure: true);
-                    if (!IsSuccess(lookup) ||
-                        !lookup.TryGetProperty("contract", out var info) ||
-                        info.ValueKind != JsonValueKind.Object ||
-                        !string.Equals(info.GetProperty("symbolId").GetString(),
-                            "F.US.EP", StringComparison.OrdinalIgnoreCase))
-                    {
-                        missedQuarters++;
-                        if (missedQuarters >= ConsecutiveEmptyQuartersToStop) break;
-                        continue;
-                    }
-                }
-                catch (HttpRequestException ex) when (ex.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.NotFound)
-                {
-                    missedQuarters++;
-                    if (missedQuarters >= ConsecutiveEmptyQuartersToStop) break;
-                    continue;
-                }
-            }
-
+            // Query historical IDs directly; some older contracts can have bars
+            // even when they no longer appear in the contract-search directory.
             int quarterBars = 0;
             bool quarterFailed = false;
             // Twelve calendar days contain at most 17,280 one-minute bars,

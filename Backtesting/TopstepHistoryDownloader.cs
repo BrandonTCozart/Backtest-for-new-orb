@@ -28,7 +28,11 @@ internal sealed class TopstepHistoryDownloader : IDisposable
 
     public static async Task<string?> RunAsync(string directory, CancellationToken cancellationToken = default)
     {
+        // Reuse the existing local Visual Studio User Secrets store from the
+        // separate Orb project, while still accepting backtest-specific secrets.
+        // This reads credentials locally; nothing is copied to this repository.
         var secrets = new ConfigurationBuilder()
+            .AddUserSecrets("dotnet-Orb-5a0d7fe3-7e13-4a4b-beba-770995e88b6d")
             .AddUserSecrets<TopstepHistoryDownloader>(optional: true)
             .Build();
         var user = FirstNonempty(
@@ -40,8 +44,7 @@ internal sealed class TopstepHistoryDownloader : IDisposable
 
         if (user is null || key is null)
         {
-            Console.WriteLine("Topstep history download: credentials not configured. Configure Visual Studio User Secrets (Topstep:UserName and Topstep:ApiKey) or TOPSTEP_USERNAME / TOPSTEP_API_KEY environment variables.");
-            Console.WriteLine("Existing historical CSV is unchanged; proceeding with local data.");
+            Console.WriteLine("TopstepX credentials were not found in either the Orb or backtest User Secrets stores or supported environment variables.");
             return null;
         }
 

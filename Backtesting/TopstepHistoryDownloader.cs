@@ -235,7 +235,7 @@ internal sealed class TopstepHistoryDownloader : IDisposable
             }
         }
         File.Move(temp, outputPath, overwrite: true);
-        if (errors == 0)
+        if (errors == 0 && retrievedCount > 0)
             await File.WriteAllTextAsync(statePath, "Historical contract search completed. Delete this marker to rescan old quarters.", cancellationToken);
         else if (File.Exists(statePath))
             File.Delete(statePath);

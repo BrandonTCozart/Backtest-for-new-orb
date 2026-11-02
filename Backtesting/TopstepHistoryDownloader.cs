@@ -32,8 +32,11 @@ internal sealed class TopstepHistoryDownloader : IDisposable
         // separate Orb project, while still accepting backtest-specific secrets.
         // This reads credentials locally; nothing is copied to this repository.
         var secrets = new ConfigurationBuilder()
+            // Original backtest project ID: its existing secrets.json was stored
+            // here before the optimizer was added. Keep that store as primary.
             .AddUserSecrets("dotnet-Orb-5a0d7fe3-7e13-4a4b-beba-770995e88b6d")
-            .AddUserSecrets<TopstepHistoryDownloader>(optional: true)
+            .AddUserSecrets("Backtest-for-new-orb-Topstep-ReadOnly")
+            .AddUserSecrets("dotnet-Backtest_for_new_orb-91f535b9-437c-4a70-ae84-ee85729d8eb9")
             .Build();
         var user = FirstNonempty(
             Environment.GetEnvironmentVariable("TOPSTEP_USERNAME"),

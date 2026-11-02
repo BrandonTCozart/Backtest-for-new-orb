@@ -109,7 +109,7 @@ internal sealed class TopstepHistoryDownloader : IDisposable
         {
             var contractStart = RollDateUtc(PreviousQuarter(year, month));
             var lower = contractStart > refreshFrom ? contractStart : refreshFrom;
-            var upper = Math.Min(RollDateUtc(year, month), newest);
+            var upper = Min(RollDateUtc(year, month), newest);
             if (upper <= lower) continue;
 
             var generatedId = "CON.F.US.EP." + QuarterCode(month) +

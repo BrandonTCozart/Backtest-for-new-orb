@@ -107,7 +107,8 @@ internal sealed class TopstepHistoryDownloader : IDisposable
 
         foreach (var (year, month) in QuartersDescending(newest.Year + 1))
         {
-            var lower = Math.Max(RollDateUtc(PreviousQuarter(year, month)), refreshFrom);
+            var contractStart = RollDateUtc(PreviousQuarter(year, month));
+            var lower = contractStart > refreshFrom ? contractStart : refreshFrom;
             var upper = Math.Min(RollDateUtc(year, month), newest);
             if (upper <= lower) continue;
 

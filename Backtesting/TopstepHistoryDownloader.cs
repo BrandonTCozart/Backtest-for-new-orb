@@ -12,7 +12,7 @@ namespace Backtest_for_new_orb;
 /// Read-only TopstepX/ProjectX ES 1-minute history downloader.
 /// Keeps the original CSV and all optimization code; never calls order endpoints.
 /// </summary>
-internal sealed class TopstepHistoryDownloader
+internal sealed class TopstepHistoryDownloader : IDisposable
 {
     public const string OutputName = "es_1m_max_available.csv";
     private const string ApiUrl = "https://api.topstepx.com";

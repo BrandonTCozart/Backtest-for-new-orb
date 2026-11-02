@@ -15,7 +15,7 @@ public static class OptimizationRunner
         Console.WriteLine("IMPORTANT: MES P&L uses ES candles as a proxy, not actual MES history.");
 
         var folder = Path.Combine(BacktestRunner.FindRoot(), "data");
-        var files = new[] { "es_1m_3months.csv", "es_1m_3months_INCOMPLETE.csv" }
+        var files = new[] { TopstepHistoryDownloader.OutputName, "es_1m_3months.csv", "es_1m_3months_INCOMPLETE.csv" }
             .Select(n => Path.Combine(folder, n)).Where(File.Exists).ToArray();
         if (files.Length == 0)
         {

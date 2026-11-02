@@ -26,7 +26,7 @@ public static class BacktestRunner
         var root = FindRoot();
         var dir = Path.Combine(root, "data");
         // Prefer the complete history when both files are present.
-        var files = new[] { "es_1m_3months.csv", "es_1m_3months_INCOMPLETE.csv" }
+        var files = new[] { TopstepHistoryDownloader.OutputName, "es_1m_3months.csv", "es_1m_3months_INCOMPLETE.csv" }
             .Select(n => Path.Combine(dir, n)).Where(File.Exists).ToArray();
         if (files.Length == 0)
         {

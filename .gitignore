@@ -60,3 +60,6 @@ nunit-*.xml
 
 *.vsidx
 .vs/
+# Historical market-data download checkpoint and temporary files
+/data/*.backfill-complete
+/data/*.tmp

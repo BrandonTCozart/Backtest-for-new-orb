@@ -15,13 +15,13 @@ public static class WalkForwardRunner
     private const int WeekdaySubsetCount = WeekdaySelection.All;
     private static readonly int EconomicRuleCount = Enum.GetValues<EconomicEventRule>().Length;
 
-    public static int Run(List<PriceBar> bars)
+    public static int Run(List<PriceBar> bars, List<PriceBar>? allContractBars = null)
     {
         Console.WriteLine("ORB FULL-DATASET OPTIMIZER + WALK-FORWARD TEST");
         Console.WriteLine("Using original Orb stage stops, not the $500/$450 experiment.");
         Console.WriteLine("Using SQL dbo.MES_DATA candles; no Topstep download or live orders.");
-        Console.WriteLine("ES trade P&L uses the original $50/point multiplier on MES-sourced prices.");
-        Console.WriteLine("Caps: first position 1-2 ES; optional reversal 0-20 MES (MES-sourced price proxy).");
+        Console.WriteLine("Source table name is MES_DATA, but rows are ES contracts; trades use real ES candles and $50/point.");
+        Console.WriteLine("Caps: first position 1-2 ES; optional reversal 0-20 MES (ES-price proxy).");
 
         var directory = Path.Combine(BacktestRunner.FindRoot(), "data");
         Directory.CreateDirectory(directory);
@@ -37,7 +37,7 @@ public static class WalkForwardRunner
                 "Event-filter scores outside that range treat missing events as normal days; " +
                 "extend Backtesting/EconomicCalendar.cs before relying on those filters.");
 
-        var sessions = OptimizationData.Prepare(bars)
+        var sessions = OptimizationData.Prepare(bars, allContractBars ?? bars)
             .Where(s => s.Range is not null)
             .OrderBy(s => s.Day).ToArray();
         if (sessions.Length < 20)

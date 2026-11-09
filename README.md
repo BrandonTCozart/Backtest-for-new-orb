@@ -47,7 +47,8 @@ The portfolio selects **at most one strategy per time slot**, never overlaps act
 Pressing Play in default `Multi` mode writes the following reports into `data/`:
 
 - `multi_strategy_summary.txt` — training-selected portfolio out-of-sample P&L, per-fold results and each strategy's best full-history configuration, profitability, win rate and drawdown.
-- `multi_strategy_full_sample_winners.csv` — best **in-sample** candidate for each of the seven strategies and the exact settings, net profit, win rate, drawdown, average trade and profit factor.
+- `multi_strategy_full_sample_winners.csv` — highest-**net-profit** **in-sample** candidate for each of the seven strategies and the exact settings, net profit, win rate, drawdown, average trade and profit factor.
+- `multi_strategy_full_sample_highest_win_rate.csv` — highest-**win-rate** candidate in each strategy family, using the same minimum trade-count requirement and reporting its **net profit**, costs, drawdown and settings; this is also **in-sample**.
 - `multi_strategy_individual_walkforward.csv` — the **out-of-sample** result of each strategy's training-selected configuration on the next block.
 - `multi_strategy_portfolio_walkforward.csv` — compare **single-strategy**, **fixed multi-session**, and **adaptive-regime** policies with per-fold training and out-of-sample results.
 - `multi_strategy_portfolio_trades.csv` and `multi_strategy_portfolio_monthly.csv` — selected portfolio trades, chronological P&L and monthly summaries.

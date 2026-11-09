@@ -197,7 +197,7 @@ public static class WalkForwardRunner
         };
         var summary = new List<string> {
             "ORB FULL-DATASET OPTIMIZER + WALK-FORWARD RESULTS",
-            "Dataset: " + Path.GetFileName(csvPath),
+            "Dataset: dbo.MES_DATA (SQL Server)",
             "Full eligible session range: " + sessions[0].Day + " through " + sessions[^1].Day,
             "Method: expanding-window train, select on training P&L only, test immediately following dates",
             "Config grid: " + evaluated.ToString("N0", CI) + " distinct configurations, trained 3 times each",
@@ -472,7 +472,7 @@ public static class WalkForwardRunner
 
         File.WriteAllLines(optimalFullSummaryPath, new[] {
             "BEST OVERALL FULL-DATASET CONFIGURATION",
-            "Dataset: " + Path.GetFileName(csvPath),
+            "Dataset: dbo.MES_DATA (SQL Server)",
             "Available opening-range sessions: " + sessions.Length,
             "Dates: " + sessions[0].Day + " through " + sessions[^1].Day,
             "Configurations evaluated: " + evaluated,

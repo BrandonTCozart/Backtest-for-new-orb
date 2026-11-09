@@ -174,17 +174,25 @@ public static class MultiStrategyData
             var nightStart = MarketTime.ToUtc(day.AddDays(-1), new TimeOnly(18, 0));
             var nightEnd = rthStart;
             var night = new List<PriceBar>(OvernightMinuteCount);
-            if (contracts.TryGetValue(contract, out var source))
+            var observedOvernightMinutes = 0;
+            DateTimeOffset? firstOvernightGap = null;
+            contracts.TryGetValue(contract, out var source);
+            for (var time = nightStart; time < nightEnd; time = time.AddMinutes(1))
             {
-                for (var time = nightStart; time < nightEnd; time = time.AddMinutes(1))
+                var validBar = source is not null &&
+                    source.TryGetValue(time, out var _unused) &&
+                    !duplicateTimes.Contains((contract.ToUpperInvariant(), time));
+                if (!validBar)
                 {
-                    if (!source.TryGetValue(time, out var bar) ||
-                        duplicateTimes.Contains((contract.ToUpperInvariant(), time)))
-                        break;
-                    night.Add(bar);
+                    firstOvernightGap ??= time;
+                    continue;
                 }
+                observedOvernightMinutes++;
+                if (firstOvernightGap is null)
+                    night.Add(source![time]);
             }
             var overnightOk = nightEnd - nightStart == TimeSpan.FromMinutes(OvernightMinuteCount) &&
+                              firstOvernightGap is null &&
                               night.Count == OvernightMinuteCount;
             if (!overnightOk) missingOvernight++;
             var rthMetrics = MultiIndicators.Calculate(rth);
@@ -211,8 +219,12 @@ public static class MultiStrategyData
                     nightBars[59].C.C - nightBars[0].C.O,
                 FirstHourOvernightAtr = nightMetrics is null ? 0m : nightMetrics.Atr14[59]
             });
-            rows.Add($"{day:yyyy-MM-dd},{contract},{rth.Length},yes,{night.Count}," +
-                     $"{(overnightOk ? "yes" : "no")},{(overnightOk ? "ok" : "overnight_unavailable")}");
+            var nightReason = overnightOk ? "ok" :
+                "overnight_first_missing_" +
+                (firstOvernightGap?.ToString("yyyyMMddTHHmmss", CultureInfo.InvariantCulture)
+                    ?? "invalid_duration");
+            rows.Add($"{day:yyyy-MM-dd},{contract},{rth.Length},yes,{observedOvernightMinutes}," +
+                     $"{(overnightOk ? "yes" : "no")},{nightReason}");
         }
 
         File.WriteAllLines(Path.Combine(reportDirectory, "multi_strategy_data_quality.csv"), rows);

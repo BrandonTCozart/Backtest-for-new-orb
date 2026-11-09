@@ -21,19 +21,19 @@ Alternatively, store `ConnectionStrings:MarketData` using Visual Studio **Manage
 ```json
 {
   "MarketData": {
-    "Symbol": "MES",
+    "Symbol": "",
     "TimestampTimeZone": "America/New_York"
   }
 }
 ```
 
 - **Table**: `dbo.MES_DATA` with columns `ts_event`, `symbol`, `open`, `high`, `low`, `close`, `volume`. All matching rows are loaded in chronological order; the date range is whatever is actually available in SQL.
-- **Symbol**: `MES`, matching `orb-analysis`'s default request. Set `MarketData:Symbol` if your table uses another symbol.
+- **Symbol**: Empty by default. SQL contract symbols may be `MESU6`, `MESZ6`, etc., not the literal `MES`. With an empty symbol, the loader picks the highest-volume regular-session symbol for each Eastern date and keeps that one contract for the day (no mixing contracts within a trading day). To use one specific symbol instead, set `MarketData:Symbol` to the exact value in the database. If it finds no rows, it prints available symbols and counts.
 - **Time zone**: `America/New_York` interprets `ts_event` as Eastern wall-clock time, the way `orb-analysis` currently uses it for the 9:30 market open. **If your database actually stores UTC timestamps**, change `MarketData:TimestampTimeZone` to `UTC` before running; incorrect settings shift the opening range and invalidate the test.
-- **Pricing**: The source is **MES candles**, but the existing optimizer still evaluates 1–2 **ES-sized** initial positions at $50 per point and optional MES reversal trades at $5 per point. Therefore the ES P&L is a **MES-price proxy**, not an ES execution backtest. No contract-roll metadata is reconstructed from a continuous `MES` symbol.
+- **Pricing**: The source is **MES candles**, but the existing optimizer still evaluates 1–2 **ES-sized** initial positions at $50 per point and optional MES reversal trades at $5 per point. Therefore the ES P&L is a **MES-price proxy**, not an ES execution backtest. For multi-contract tables, a daily volume-based roll is inferred from available rows; explicit broker contract-roll metadata is not available.
 - **Output**: All existing optimizer reports and trades are still written to `data/` as CSV/text **results**. Input candle CSV files are no longer needed.
 
-The SQL query uses a read-only SELECT. It validates chronological timestamps, unique bars, OHLC, and numeric volume. If configuration is missing or no bars match, the program stops with a descriptive error rather than silently analyzing stale CSV data.
+The SQL query uses a read-only SELECT. It validates chronological timestamps, unique bars per chosen contract/date, OHLC, and numeric volume. If configuration is missing or no bars match, the program stops with a descriptive error rather than silently analyzing stale CSV data.
 
 ## How the walk-forward test works
 

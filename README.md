@@ -1,10 +1,66 @@
-# ORB Full-Dataset Optimizer + Walk-Forward Test
+# ES Multi-Strategy Backtester + Original ORB Optimizer
 
-Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The program now **reads ES futures one-minute candles directly from SQL Server `dbo.MES_DATA`**, the same table used by `BrandonTCozart/orb-analysis`. It then runs the **existing full-dataset parameter search and expanding-window walk-forward tests** unchanged. It does **not** fetch Topstep history or read candle CSV files at startup, and it never places live orders. The original download/legacy CSV utilities remain in source but are not called by Play.
+Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The program reads **ES futures one-minute candles from SQL Server `dbo.MES_DATA`** (the table name is legacy; the data are ES). By default it runs a **new seven-strategy comparative backtest**. No live orders, Topstep downloads or candle CSV inputs are used.
+
+## Choose which research to run
+
+Set `Backtest:Mode` in `appsettings.json` or a local override:
+
+| Mode | What runs |
+| --- | --- |
+| `Multi` **(default)** | New multi-strategy grid, individual strategy walk-forward tests, and a strategy-routing portfolio |
+| `Orb` | Original exhaustive 2,571,264-configuration ORB optimizer and its separate walk-forward reports |
+| `Both` | Run multi-strategy first, then the original exhaustive ORB optimizer |
+
+The new multi-strategy mode uses a **smaller, purpose-built grid** of 416 configurations across seven strategy types to permit repeatable research. It does not replace or prune the existing large ORB search, available under `Orb` or `Both`.
+
+## Strategies, trading hours and execution
+
+All hours are **Eastern**. Every strategy uses **completed one-minute OHLCV bars**; signals are placed at bar close, entries simulated at the *next* bar's open, with the same estimated **$10 round-trip per ES** cost and a conservative **stop-first** assumption when stop and target touch inside one candle.
+
+| Strategy | Entry research window | Hard time exit |
+| --- | --- | --- |
+| Original ORB with its actual staged stop logic | 09:45–10:00 or 11:00 cutoff | Original Orb time/stop rules (typically by 16:00) |
+| Morning momentum (previous 10/20-bar breakout, EMA trend, VWAP, relative volume) | 09:45–11:00 | 11:30 |
+| Morning VWAP mean reversion (distance from VWAP + RSI + reversal candle) | 10:00–11:15 | 11:30 |
+| Afternoon momentum (fresh 10/20-bar breakout, EMA/VWAP and volume confirmation) | 13:00–15:00 | 15:55 |
+| Afternoon VWAP mean reversion | 13:00–15:05 | 15:55 |
+| Overnight momentum (breakout of first hour's high/low) | 19:00–21:00 preceding evening | 08:00 following morning |
+| Overnight reversion (fade extremes beyond first-hour range) | 19:00–21:00 preceding evening | 08:00 following morning |
+
+The overnight trading session for a given regular-trading day starts at **18:00 ET the preceding calendar day**. New strategies use **one ES**, an ATR-derived initial stop capped at **$600 including assumed transaction cost**, and several tested reward/risk, lookback, breakout/mean-reversion threshold, and economic-news parameters. The ORB baseline uses the original ORB exits, not these fixed bracket exits.
+
+The event rules are reused from the 2025–2026 economic calendar: off, avoid major announcement dates, avoid intraday announcement windows and avoid FOMC plus prior trading day. Overnight tests omit the redundant intraday-window policy.
+
+## Valid trading days and avoiding hindsight
+
+Before testing, the runner validates that the US regular session contains **exactly 390 consecutive one-minute candles from 09:30 through 15:59 ET**, all for one ES contract. Any incomplete or mixed-contract RTH date is excluded from the entire multi-strategy comparison, not quietly filled with synthetic candles. Overnight strategies additionally require **all 930 consecutive one-minute candles from prior-day 18:00 through the current day's 09:29 ET** for the same contract. If overnight data are incomplete, the RTH date remains eligible for *morning and afternoon* strategies; only the overnight slot is unavailable. A dated audit is written to `data/multi_strategy_data_quality.csv`. Regular early-close sessions are deliberately excluded.
+
+There are three expanding-window chronological walk-forward folds. Within each fold, only the **training** segment chooses each strategy's configuration, the best fixed strategy for each time slot, and the dynamic regime-routing thresholds. The immediately following test segment is untouched by that fold's parameter selection. The dynamic router only uses features available **before** the corresponding trading session: overnight's first hour (by 19:00), opening-range width/volume/move (by 09:45), and the morning move/ATR (by 13:00). A fallback **single strategy** and a **fixed three-session schedule** are also compared with the adaptive router; the best *training* policy is then applied to the next test block.
+
+The portfolio selects **at most one strategy per time slot**, never overlaps actual position timestamps, limits trading to **three sequential trades per trading date**, and stops placing new entries once prior trades that date have realized **-$1,000 or worse**. It does **not** cap the loss on a gap-through stop; that risk is reported by the simulated fill. ES contract rollovers are never stitched within a single trade. The model intentionally uses minute bars (not quote/tick data), and all results remain research estimates.
+
+**Research caveat:** We have already examined this historical period while developing ORB. Walk-forward testing reduces within-fold hindsight, but this historical dataset is not wholly unexamined; comparing many new ideas on it can still overfit. Never confuse the in-sample best-configuration reports with future returns.
+
+## New multi-strategy reports
+
+Pressing Play in default `Multi` mode writes the following reports into `data/`:
+
+- `multi_strategy_summary.txt` — training-selected portfolio out-of-sample P&L, per-fold results and each strategy's best full-history configuration, profitability, win rate and drawdown.
+- `multi_strategy_full_sample_winners.csv` — best **in-sample** candidate for each of the seven strategies and the exact settings, net profit, win rate, drawdown, average trade and profit factor.
+- `multi_strategy_individual_walkforward.csv` — the **out-of-sample** result of each strategy's training-selected configuration on the next block.
+- `multi_strategy_portfolio_walkforward.csv` — compare **single-strategy**, **fixed multi-session**, and **adaptive-regime** policies with per-fold training and out-of-sample results.
+- `multi_strategy_portfolio_trades.csv` and `multi_strategy_portfolio_monthly.csv` — selected portfolio trades, chronological P&L and monthly summaries.
+- `multi_strategy_candidate_scores.csv` — every tested candidate's training-fold and full-sample metrics.
+- `multi_strategy_data_quality.csv` — actual RTH and overnight minute counts, missing windows and excluded dates.
+
+To compile and run synthetic checks without SQL: `dotnet run -- --self-test`. GitHub Actions also runs a .NET 10 build and these dependency-free tests on each push. For the full historical analysis, your local SQL connection is still required.
+
+---
 
 ## Configure SQL Server once
 
-Like `orb-analysis`, this project reads **`ConnectionStrings:MarketData`**. The connection string is not stored in GitHub. Add a local **`appsettings.Development.json`** file next to the backtest project's `.csproj` (this filename is ignored by Git), using the **same SQL connection string that works in `orb-analysis`**:
+Like `orb-analysis`, this project reads **`ConnectionStrings:MarketData`**. Put your working SQL connection string in **`appsettings.Local.json`** next to the `.csproj`, or in **Visual Studio User Secrets**. The local file is Git-ignored. The repository's existing `appsettings.Development.json` is a **tracked placeholder**, so do **not** put real credentials in that tracked file:
 
 ```json
 {
@@ -14,15 +70,18 @@ Like `orb-analysis`, this project reads **`ConnectionStrings:MarketData`**. The 
 }
 ```
 
-Alternatively, store `ConnectionStrings:MarketData` using Visual Studio **Manage User Secrets**, or provide the environment variable `ConnectionStrings__MarketData`. Environment variables override local JSON; no login information is added to source control.
+Alternatively, use **Manage User Secrets** or the environment variable `ConnectionStrings__MarketData`. Existing development config is still read for backward compatibility; the ignored `appsettings.Local.json` override is loaded after it. Environment variables have highest precedence. Never commit a real password.
 
-`appsettings.json` provides the input defaults:
+`appsettings.json` provides the source and run-mode defaults:
 
 ```json
 {
   "MarketData": {
     "Symbol": "",
     "TimestampTimeZone": "America/New_York"
+  },
+  "Backtest": {
+    "Mode": "Multi"
   }
 }
 ```
@@ -124,4 +183,4 @@ Older `optimizer_best_...`, `optimizer_top10_holdout.csv`, and `optimizer_all_co
 - The event-calendar policies are applied without using release outcomes, and train/test date boundaries remain chronological. The historical event calendar covers October 6, 2025–October 30, 2026 and is not a live feed.
 - The optimizer evaluates the **same exhaustive 2,571,264-config grid** and writes the same output files, but avoids two major redundant operations: the first-entry signal is cached across risk/position/trailing variants (all of which share the same entry rules), and all three expanding-window training prefixes plus the full sample are aggregated **in one chronological pass** instead of four scans of overlapping days. Trades, costs, chronological ordering, drawdown, and fold ranking rules are unchanged. Progress is printed every 100 base configurations. The run may still take time because it tests the full grid, and stopping early leaves only a partial all-configurations CSV.
 
-**Development status:** SQL Server candle loading is now the default start-up path. The historical-download code remains for reference but is no longer run by pressing Play. This environment cannot access your local SQL Server or execute a .NET build, so the new query and backtest must be verified in Visual Studio.
+**Development status:** SQL Server candle loading is the default start-up path. The old download code remains for reference. Automated GitHub Actions compile and synthetic-check the new code; actual historical SQL backtest outputs must still be produced from your connected local SQL Server.

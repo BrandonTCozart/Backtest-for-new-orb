@@ -17,6 +17,7 @@ public static class WalkForwardRunner
 
     public static int Run(List<PriceBar> bars, List<PriceBar>? allContractBars = null)
     {
+        OptimizationEngine.ClearCaches();
         Console.WriteLine("ORB FULL-DATASET OPTIMIZER + WALK-FORWARD TEST");
         Console.WriteLine("Using original Orb stage stops, not the $500/$450 experiment.");
         Console.WriteLine("Using SQL dbo.MES_DATA candles; no Topstep download or live orders.");
@@ -67,6 +68,7 @@ public static class WalkForwardRunner
             (BaseCombinationCount * WeekdaySubsetCount * EconomicRuleCount).ToString("N0", CI) +
             " configurations on EACH of 3 training windows AND the full dataset.");
         Console.WriteLine("Daily trade paths are reused across weekdays, event policies and folds.");
+        Console.WriteLine("Performance: entry signals are cached across risk/position variants; overlapping fold scores use one pass.");
         Console.WriteLine("Event policies: Off; skip major release days; skip 30m before/15m after intraday releases; skip FOMC decision day and prior trading day.");
         Console.WriteLine("No future test-period P&L is used to select configurations.");
 

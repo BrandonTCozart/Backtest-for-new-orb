@@ -14,28 +14,28 @@ public static class WalkForwardRunner
     private const int WeekdaySubsetCount = WeekdaySelection.All;
     private static readonly int EconomicRuleCount = Enum.GetValues<EconomicEventRule>().Length;
 
-    public static int Run()
+    public static int Run(List<PriceBar> bars)
     {
         Console.WriteLine("ORB FULL-DATASET OPTIMIZER + WALK-FORWARD TEST");
         Console.WriteLine("Using original Orb stage stops, not the $500/$450 experiment.");
-        Console.WriteLine("Only local ES candles; no Topstep access or live orders.");
-        Console.WriteLine("Caps: first position 1-2 ES; optional reversal 0-20 MES (ES price proxy).");
+        Console.WriteLine("Using SQL dbo.MES_DATA candles; no Topstep download or live orders.");
+        Console.WriteLine("ES trade P&L uses the original $50/point multiplier on MES-sourced prices.");
+        Console.WriteLine("Caps: first position 1-2 ES; optional reversal 0-20 MES (MES-sourced price proxy).");
 
         var directory = Path.Combine(BacktestRunner.FindRoot(), "data");
-        var files = new[] { TopstepHistoryDownloader.OutputName, "es_1m_3months.csv", "es_1m_3months_INCOMPLETE.csv" }
-            .Select(filename => Path.Combine(directory, filename))
-            .Where(File.Exists).ToArray();
-        if (files.Length == 0)
-        {
-            Console.Error.WriteLine("No ES CSV found in " + directory);
-            return 1;
-        }
-        var csvPath = files[0];
-        if (Path.GetFileName(csvPath).Contains("INCOMPLETE", StringComparison.OrdinalIgnoreCase))
-            Console.WriteLine("Input file: INCOMPLETE historical candle export.");
-        Console.WriteLine("Reading " + csvPath);
+        Directory.CreateDirectory(directory);
 
-        var bars = BacktestRunner.Load(csvPath);
+        var firstDay = DateOnly.FromDateTime(MarketTime.ToEastern(bars[0].T).Date);
+        var lastDay = DateOnly.FromDateTime(MarketTime.ToEastern(bars[^1].T).Date);
+        // The event calendar is hardcoded for Aug-Oct 2026, not a complete
+        // historical release feed. Report when the SQL dataset exceeds it.
+        if (firstDay < new DateOnly(2026, 8, 3) ||
+            lastDay > new DateOnly(2026, 10, 30))
+            Console.WriteLine(
+                "WARNING: Economic release calendar is only populated for Aug-Oct 2026. " +
+                "Event-filter scores outside that range treat missing events as normal days; " +
+                "extend Backtesting/EconomicCalendar.cs before relying on those filters.");
+
         var sessions = OptimizationData.Prepare(bars)
             .Where(s => s.Range is not null)
             .OrderBy(s => s.Day).ToArray();

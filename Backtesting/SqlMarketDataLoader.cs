@@ -6,13 +6,15 @@ namespace Backtest_for_new_orb;
 
 /// <summary>
 /// Read-only SQL candle source matching orb-analysis/Services/MarketDataRepository.
-/// Empty symbol (the default) automatically selects the most actively traded
-/// MES contract for each Eastern calendar date, without mixing contract prices
-/// within a day. A nonempty symbol reads only that exact value.
+/// The source table is named MES_DATA but contains ES contracts.
+/// An empty symbol selects one active ES contract per Eastern date for trading,
+/// while retaining every contract's minute bars for the strategy's 7-day lookback.
 /// </summary>
+public sealed record SqlMarketDataSet(List<PriceBar> ActiveBars, List<PriceBar> AllContractBars);
+
 public static class SqlMarketDataLoader
 {
-    public static async Task<List<PriceBar>> LoadAsync(
+    public static async Task<SqlMarketDataSet> LoadAsync(
         string? connectionString, string symbol, string timestampTimeZone,
         CancellationToken cancellationToken = default)
     {
@@ -38,6 +40,7 @@ public static class SqlMarketDataLoader
             """;
 
         var result = new List<PriceBar>();
+        var allContractBars = new List<PriceBar>();
         var dayBars = new List<PriceBar>();
         DateOnly? currentDay = null;
         string? lastSelectedSymbol = null;
@@ -81,6 +84,7 @@ public static class SqlMarketDataLoader
                     T = timestamp, O = open, H = high, L = low, C = close, V = volume
                 };
                 var bar = new PriceBar(timestamp, actualSymbol, candle);
+                allContractBars.Add(bar);
                 var day = DateOnly.FromDateTime(MarketTime.ToEastern(timestamp).Date);
 
                 if (currentDay is { } previousDay && day != previousDay)
@@ -99,8 +103,7 @@ public static class SqlMarketDataLoader
 
         if (result.Count == 0)
         {
-            // A connected database can contain contract-specific symbols (MESU6,
-            // MESZ6, etc.) rather than the literal symbol "MES".
+            // The mislabeled MES_DATA table contains contract-specific ES symbols.
             const string listSql = """
                 SELECT TOP (20) symbol, COUNT_BIG(*) AS candle_count
                 FROM dbo.MES_DATA
@@ -123,9 +126,12 @@ public static class SqlMarketDataLoader
 
         Console.WriteLine(
             symbol.Length == 0
-                ? $"SQL auto-selected the most active symbol on {selectedDays:N0} calendar dates."
-                : $"SQL selected exact symbol '{symbol}'.");
-        return result;
+                ? $"SQL auto-selected the most active ES contract on {selectedDays:N0} calendar dates."
+                : $"SQL selected exact ES contract '{symbol}'.");
+        Console.WriteLine($"SQL source rows (all contracts): {allContractBars.Count:N0}; " +
+                          $"active-contract candle rows: {result.Count:N0}; " +
+                          $"overlap/alternate-contract rows retained for historical lookback: {allContractBars.Count - result.Count:N0}");
+        return new SqlMarketDataSet(result, allContractBars);
 
         void FlushDay(DateOnly day)
         {

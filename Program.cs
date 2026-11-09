@@ -18,9 +18,9 @@ try
         .AddEnvironmentVariables()
         .Build();
 
-    var symbol = configuration["MarketData:Symbol"] ?? "MES";
+    var symbol = configuration["MarketData:Symbol"] ?? "";
     var timeZone = configuration["MarketData:TimestampTimeZone"] ?? "America/New_York";
-    Console.WriteLine($"Reading dbo.MES_DATA from SQL Server; symbol='{symbol}'; stored-timezone={timeZone}");
+    Console.WriteLine($"Reading dbo.MES_DATA from SQL Server; symbol={(string.IsNullOrWhiteSpace(symbol) ? "(auto-detect active contract)" : symbol)}; stored-timezone={timeZone}");
     Console.WriteLine("Data are MES candles; optimizer retains its original ES-dollar and MES-proxy trade assumptions.");
 
     var bars = await SqlMarketDataLoader.LoadAsync(

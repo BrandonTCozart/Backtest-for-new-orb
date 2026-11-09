@@ -82,6 +82,7 @@ public static class WalkForwardRunner
         var latestFullTradesPath = Path.Combine(directory, "optimizer_full_sample_latest_config_trades.csv");
         var optimalFullTradesPath = Path.Combine(directory, "optimizer_full_dataset_best_trades.csv");
         var optimalFullSummaryPath = Path.Combine(directory, "optimizer_full_dataset_best_summary.txt");
+        var highestWinRateSummaryPath = Path.Combine(directory, "optimizer_full_dataset_highest_win_rate_summary.txt");
         EconomicCalendar.WriteCalendarCsv(directory);
         Console.WriteLine("Economic release schedule: " + Path.Combine(directory, "optimizer_economic_calendar_2025_2026.csv"));
 
@@ -89,6 +90,7 @@ public static class WalkForwardRunner
         var eligibleCount = new long[folds.Length];
         var minimumFullSampleTrades = Math.Max(4, (sessions.Length + 3) / 4);
         OptimizationResult? fullDatasetWinner = null;
+        OptimizationResult? fullDatasetWinRateWinner = null;
         long eligibleFullCount = 0;
         long evaluated = 0;
         int baseNumber = 0;
@@ -135,6 +137,8 @@ public static class WalkForwardRunner
                             eligibleFullCount++;
                             if (IsBetter(score, fullDatasetWinner))
                                 fullDatasetWinner = score;
+                            if (IsHigherWinRate(score, fullDatasetWinRateWinner))
+                                fullDatasetWinRateWinner = score;
                         }
                         var firstScore = scoresByFold[0];
                         writer.Write(firstScore.Config.Id.ToString(CI));
@@ -351,6 +355,8 @@ public static class WalkForwardRunner
         var latestFull = fullSampleResults[^1];
         var fullBest = OptimizationEngine.Evaluate(fullDatasetWinner!.Config,
             sessions, keepTrades: true);
+        var fullBestWinRate = OptimizationEngine.Evaluate(fullDatasetWinRateWinner!.Config,
+            sessions, keepTrades: true);
 
         Console.WriteLine();
         Console.WriteLine("BEST OVERALL CONFIGURATION (optimized across ALL " +
@@ -367,6 +373,21 @@ public static class WalkForwardRunner
             fullBest.WinningTrades + "; maximum closed-trade drawdown $" +
             F(fullBest.MaxDrawdown));
         foreach (var line in HumanSettings(fullBest.Config).Split("; "))
+            Console.WriteLine(line);
+
+        Console.WriteLine();
+        Console.WriteLine("HIGHEST WIN-RATE CONFIGURATION (same full dataset and minimum ES trade count)");
+        Console.WriteLine("Config " + fullBestWinRate.Config.Id +
+            ": WIN RATE " + F(WinRatePercent(fullBestWinRate)) + "%" +
+            " (" + fullBestWinRate.WinningTrades + "/" + fullBestWinRate.TotalTrades + " trades)");
+        Console.WriteLine("FULL DATASET NET P&L $" + F(fullBestWinRate.Net) +
+            "; gross $" + F(fullBestWinRate.Gross) +
+            "; estimated costs $" + F(fullBestWinRate.Costs));
+        Console.WriteLine("Trades: " + fullBestWinRate.EsTrades + " ES, " +
+            fullBestWinRate.MesTrades + " MES ES-price-proxy; max closed-trade drawdown $" +
+            F(fullBestWinRate.MaxDrawdown));
+        Console.WriteLine("Win rate counts all profitable simulated trades, ES and MES proxy.");
+        foreach (var line in HumanSettings(fullBestWinRate.Config).Split("; "))
             Console.WriteLine(line);
 
         Console.WriteLine();
@@ -387,6 +408,10 @@ public static class WalkForwardRunner
         Console.WriteLine("BEST OVERALL ACROSS FULL GRID: config " + fullBest.Config.Id +
             ", net $" + F(fullBest.Net) +
             ", " + fullBest.EsTrades + " ES trades");
+        Console.WriteLine("HIGHEST WIN RATE ACROSS FULL GRID: config " + fullBestWinRate.Config.Id +
+            ", " + F(WinRatePercent(fullBestWinRate)) + "% wins (" +
+            fullBestWinRate.WinningTrades + "/" + fullBestWinRate.TotalTrades +
+            "), net $" + F(fullBestWinRate.Net));
         Console.WriteLine("LATEST FOLD-3 TRAINING WINNER ON FULL DATASET: config " +
             latestConfig.Id + ", net $" + F(latestFull.Net) +
             " (" + latestFull.EsTrades + " ES trades, " +
@@ -409,6 +434,20 @@ public static class WalkForwardRunner
         summary.Add("Minimum eligible ES trades: " + minimumFullSampleTrades +
             "; qualifying full-dataset configurations: " + eligibleFullCount);
         summary.Add(HumanSettings(fullBest.Config));
+        summary.Add("");
+        summary.Add("HIGHEST FULL-DATASET WIN RATE (same minimum " +
+            minimumFullSampleTrades + " ES trades)");
+        summary.Add("Winning config: " + fullBestWinRate.Config.Id +
+            "; win rate: " + F(WinRatePercent(fullBestWinRate)) + "%" +
+            " (" + fullBestWinRate.WinningTrades + "/" + fullBestWinRate.TotalTrades + " trades)");
+        summary.Add("Full-dataset net P&L: $" + F(fullBestWinRate.Net) +
+            "; gross $" + F(fullBestWinRate.Gross) +
+            "; estimated costs $" + F(fullBestWinRate.Costs));
+        summary.Add("Trades: " + fullBestWinRate.EsTrades + " ES, " +
+            fullBestWinRate.MesTrades + " MES proxy; closed-trade drawdown $" +
+            F(fullBestWinRate.MaxDrawdown));
+        summary.Add("Win rate includes profitable ES trades and simulated MES proxy trades.");
+        summary.Add(HumanSettings(fullBestWinRate.Config));
         summary.Add("");
         summary.Add("COMBINED OUT-OF-SAMPLE NET P&L (stitched fold test blocks): $" + F(runningNet));
         summary.Add("FULL-DATASET RESULTS (separate fixed-config replays):");
@@ -498,6 +537,28 @@ public static class WalkForwardRunner
                 F(runningNet)
         });
 
+        File.WriteAllLines(highestWinRateSummaryPath, new[] {
+            "HIGHEST FULL-DATASET WIN-RATE CONFIGURATION",
+            "Dataset: dbo.MES_DATA (ES futures, SQL Server)",
+            "Available opening-range sessions: " + sessions.Length,
+            "Dates: " + sessions[0].Day + " through " + sessions[^1].Day,
+            "Configurations evaluated: " + evaluated,
+            "Minimum ES trade count to qualify: " + minimumFullSampleTrades,
+            "Qualifying configurations: " + eligibleFullCount,
+            "Winning config ID: " + fullBestWinRate.Config.Id,
+            "WIN RATE: " + F(WinRatePercent(fullBestWinRate)) + "%" +
+                " (" + fullBestWinRate.WinningTrades + " wins / " +
+                fullBestWinRate.TotalTrades + " ES-plus-MES-proxy trades)",
+            "ES trades: " + fullBestWinRate.EsTrades +
+                "; MES ES-price-proxy trades: " + fullBestWinRate.MesTrades,
+            "FULL-DATASET NET P&L: $" + F(fullBestWinRate.Net),
+            "Gross: $" + F(fullBestWinRate.Gross) +
+                "; estimated costs: $" + F(fullBestWinRate.Costs),
+            "Max closed-trade drawdown: $" + F(fullBestWinRate.MaxDrawdown),
+            HumanSettings(fullBestWinRate.Config),
+            "Selection uses all available sessions: in-sample ranking, not an out-of-sample test."
+        });
+
         // Diagnostic only: compare entry-time conditions for wins AND losses.
         // No patterns are fed back into optimizer selection or test P&L.
         summary.AddRange(TradePatternAnalyzer.Analyze(
@@ -506,6 +567,7 @@ public static class WalkForwardRunner
 
         Console.WriteLine();
         Console.WriteLine("Full-grid optimal configuration: " + optimalFullSummaryPath);
+        Console.WriteLine("Full-grid highest-win-rate configuration: " + highestWinRateSummaryPath);
         Console.WriteLine("Full-grid optimal trades: " + optimalFullTradesPath);
         Console.WriteLine("Full-dataset comparison: " + fullComparisonPath);
         Console.WriteLine("Latest config full-dataset trades: " + latestFullTradesPath);
@@ -525,6 +587,28 @@ public static class WalkForwardRunner
         candidate.EsTrades > current.EsTrades ||
         candidate.Net == current.Net && candidate.MaxDrawdown == current.MaxDrawdown &&
         candidate.EsTrades == current.EsTrades && candidate.Config.Id < current.Config.Id;
+
+    // Compare win-rate fractions exactly (no rounded percentages). Candidates
+    // have already passed the same minimum ES-trade eligibility requirement as
+    // the maximum-net-profit winner, so tiny sample sizes cannot rank first.
+    private static bool IsHigherWinRate(
+        OptimizationResult candidate, OptimizationResult? current)
+    {
+        if (current is null) return true;
+        var candidateRatio = (long)candidate.WinningTrades * current.TotalTrades;
+        var currentRatio = (long)current.WinningTrades * candidate.TotalTrades;
+        return candidateRatio > currentRatio ||
+            candidateRatio == currentRatio &&
+            (candidate.Net > current.Net ||
+             candidate.Net == current.Net && candidate.MaxDrawdown < current.MaxDrawdown ||
+             candidate.Net == current.Net && candidate.MaxDrawdown == current.MaxDrawdown &&
+             candidate.EsTrades > current.EsTrades ||
+             candidate.Net == current.Net && candidate.MaxDrawdown == current.MaxDrawdown &&
+             candidate.EsTrades == current.EsTrades && candidate.Config.Id < current.Config.Id);
+    }
+
+    private static decimal WinRatePercent(OptimizationResult result) =>
+        result.TotalTrades == 0 ? 0m : 100m * result.WinningTrades / result.TotalTrades;
 
     private static string HumanSettings(OptimizationConfig c) =>
         "Entry cutoff ET: " + c.Cutoff.ToString(@"hh\:mm") +

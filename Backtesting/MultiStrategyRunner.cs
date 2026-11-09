@@ -5,7 +5,7 @@ namespace Backtest_for_new_orb;
 
 public sealed record MultiScore(
     int Trades, int Wins, decimal Net, decimal Gross, decimal Costs,
-    decimal Drawdown, decimal ProfitFactor)
+    decimal Drawdown, decimal? ProfitFactor)
 {
     public decimal WinRate => Trades == 0 ? 0m : 100m * Wins / Trades;
     public decimal Average => Trades == 0 ? 0m : Net / Trades;
@@ -27,7 +27,7 @@ public sealed record MultiScore(
             drawdown = Math.Max(drawdown, peak - net);
         }
         return new MultiScore(trades.Length, wins, net, gross, costs,
-            drawdown, losses > 0m ? gains / losses : 0m);
+            drawdown, losses > 0m ? gains / losses : null);
     }
 }
 
@@ -420,6 +420,7 @@ public static class MultiStrategyRunner
         a.Net == b.Net && a.Drawdown == b.Drawdown &&
         a.Trades == b.Trades && idA < idB;
 
+    private static string F(decimal? d) => d is null ? "n/a" : F(d.Value);
     private static string Day(DateOnly d) => d.ToString("yyyy-MM-dd", Ci);
     private static string F(decimal d) => d.ToString("0.00", Ci);
     private static string Et(DateTimeOffset d) =>

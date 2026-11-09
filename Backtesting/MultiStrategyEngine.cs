@@ -19,8 +19,7 @@ public static class MultiStrategyEngine
         foreach (var buffer in new[] { 0.5m, 1m })
         foreach (var volume in new[] { 0m, 1.25m })
         foreach (var trail in new[] { 150m, 350m })
-        foreach (var rule in new[] { EconomicEventRule.Off,
-                                    EconomicEventRule.AvoidFomcDayAndPriorTradingDay })
+        foreach (var rule in Enum.GetValues<EconomicEventRule>())
             list.Add(new MultiStrategyVariant(++id, MultiStrategyKind.Orb, 0, buffer,
                 0m, 0m, volume, cutoff, trail, rule));
 
@@ -31,8 +30,11 @@ public static class MultiStrategyEngine
                  ? new[] { 0.25m, 0.5m } : new[] { 0.75m, 1.25m })
         foreach (var stopAtr in new[] { 1m, 1.5m })
         foreach (var rewardRisk in new[] { 1m, 1.75m })
-        foreach (var rule in new[] { EconomicEventRule.Off,
-                                    EconomicEventRule.AvoidFomcDayAndPriorTradingDay })
+        foreach (var rule in kind is MultiStrategyKind.OvernightMomentum or
+                 MultiStrategyKind.OvernightReversion
+                 ? new[] { EconomicEventRule.Off, EconomicEventRule.AvoidMajorReleaseDay,
+                           EconomicEventRule.AvoidFomcDayAndPriorTradingDay }
+                 : Enum.GetValues<EconomicEventRule>())
             list.Add(new MultiStrategyVariant(++id, kind, lookback, threshold,
                 stopAtr, rewardRisk,
                 kind is MultiStrategyKind.MorningMomentum or MultiStrategyKind.AfternoonMomentum

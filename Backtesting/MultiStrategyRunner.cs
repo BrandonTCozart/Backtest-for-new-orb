@@ -227,19 +227,28 @@ public static class MultiStrategyRunner
         var fullWinners = new List<string> {
             "strategy,config_id,trades,wins,win_rate_pct,net,gross,costs,drawdown,profit_factor,average_net_per_trade,parameters"
         };
+        var highWinRateWinners = new List<string> {
+            "strategy,config_id,trades,wins,win_rate_pct,net,gross,costs,drawdown,profit_factor,average_net_per_trade,parameters"
+        };
         summary.Add("FULL-DATASET STRATEGY WINNERS (IN-SAMPLE; NOT INDEPENDENT VALIDATION)");
         foreach (var kind in Enum.GetValues<MultiStrategyKind>())
         {
             Choice? best = null;
+            Choice? bestWinRate = null;
             var minimum = Math.Max(10, sessions.Count / 12);
             foreach (var v in byKind[kind])
             {
                 var score = MultiScore.From(TradesFor(v, sessions,
                     0, sessions.Count, tradesById));
                 grid.Add(ScoreRow(0, "FULL_IN_SAMPLE", v, score));
-                if (score.Trades >= minimum &&
-                    (best is null || Better(score, v.Id, best.Score, best.Variant.Id)))
-                    best = new Choice(v, score);
+                if (score.Trades >= minimum)
+                {
+                    if (best is null || Better(score, v.Id, best.Score, best.Variant.Id))
+                        best = new Choice(v, score);
+                    if (bestWinRate is null ||
+                        HigherWinRate(score, v.Id, bestWinRate.Score, bestWinRate.Variant.Id))
+                        bestWinRate = new Choice(v, score);
+                }
             }
             if (best is null)
             {
@@ -256,6 +265,20 @@ public static class MultiStrategyRunner
                 ", trades " + a.Trades + ", drawdown $" + F(a.Drawdown) +
                 ", profit factor " + F(a.ProfitFactor));
             summary.Add("    " + best.Variant.Parameters);
+
+            if (bestWinRate is not null)
+            {
+                var w = bestWinRate.Score;
+                highWinRateWinners.Add(string.Join(",", kind, bestWinRate.Variant.Id,
+                    w.Trades, w.Wins, F(w.WinRate), F(w.Net), F(w.Gross), F(w.Costs),
+                    F(w.Drawdown), F(w.ProfitFactor), F(w.Average),
+                    bestWinRate.Variant.Parameters));
+                summary.Add("  " + kind + " HIGHEST WIN RATE: config " +
+                    bestWinRate.Variant.Id + ", " + F(w.WinRate) + "% (" +
+                    w.Wins + "/" + w.Trades + "), net $" + F(w.Net) +
+                    ", drawdown $" + F(w.Drawdown));
+                summary.Add("    " + bestWinRate.Variant.Parameters);
+            }
         }
 
         var oosOrdered = allOosTrades.OrderBy(x => x.Trade.EntryAt).ToArray();
@@ -302,6 +325,7 @@ public static class MultiStrategyRunner
         File.WriteAllLines(Path.Combine(dir, "multi_strategy_portfolio_trades.csv"), tradeRows);
         File.WriteAllLines(Path.Combine(dir, "multi_strategy_portfolio_monthly.csv"), monthly);
         File.WriteAllLines(Path.Combine(dir, "multi_strategy_full_sample_winners.csv"), fullWinners);
+        File.WriteAllLines(Path.Combine(dir, "multi_strategy_full_sample_highest_win_rate.csv"), highWinRateWinners);
         File.WriteAllLines(Path.Combine(dir, "multi_strategy_summary.txt"), summary);
 
         Console.WriteLine();
@@ -311,6 +335,7 @@ public static class MultiStrategyRunner
             "% wins, drawdown $" + F(totalOos.Drawdown));
         Console.WriteLine("See data/multi_strategy_summary.txt for each strategy and fold.");
         Console.WriteLine("Detailed CSV reports: multi_strategy_full_sample_winners.csv, " +
+                          "multi_strategy_full_sample_highest_win_rate.csv, " +
                           "multi_strategy_portfolio_walkforward.csv, " +
                           "multi_strategy_individual_walkforward.csv, " +
                           "multi_strategy_portfolio_trades.csv, " +
@@ -411,6 +436,16 @@ public static class MultiStrategyRunner
             }
         }
         return new PortfolioOutcome(policy, MultiScore.From(chosenTrades), chosenTrades);
+    }
+
+    // Exact win/trade ratios; avoid rounding ties. Minimum trade eligibility
+    // is checked by the caller before comparing two full-sample candidates.
+    private static bool HigherWinRate(MultiScore a, int idA, MultiScore b, int idB)
+    {
+        var left = (long)a.Wins * b.Trades;
+        var right = (long)b.Wins * a.Trades;
+        return left > right ||
+            left == right && Better(a, idA, b, idB);
     }
 
     private static bool Better(MultiScore a, int idA, MultiScore b, int idB) =>

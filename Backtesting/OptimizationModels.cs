@@ -69,9 +69,10 @@ public sealed class OptimizationResult
 
 public static class OptimizationData
 {
-    public static List<SessionData> Prepare(List<PriceBar> all)
+    public static List<SessionData> Prepare(List<PriceBar> all, List<PriceBar>? completeContractHistory = null)
     {
         var logic = new OrbStrategy();
+        var historicalBars = completeContractHistory ?? all;
         var sessions = all.Where(x =>
         {
             var et = MarketTime.ToEastern(x.T);
@@ -92,7 +93,7 @@ public static class OptimizationData
             // The live worker requests history for the active contract.
             // Do not join price/FVG history across futures contract rolls.
             var contract = bars[0].Contract;
-            var past = all.Where(x => x.T >= from && x.T < to &&
+            var past = historicalBars.Where(x => x.T >= from && x.T < to &&
                         string.Equals(x.Contract, contract, StringComparison.OrdinalIgnoreCase))
                 .Select(x => x.C).ToArray();
             var opening = logic.GetOpeningRange(bars.Select(x => x.C), day);

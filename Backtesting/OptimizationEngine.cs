@@ -10,7 +10,19 @@ public static class OptimizationEngine
     private readonly record struct TradeKey(
         DateOnly Day, int SignalIndex, TradeDirection Side, int Quantity,
         bool Mes, decimal RiskCap, decimal Fallback, decimal EsTrail);
+    private readonly record struct EntryKey(
+        DateOnly Day, TimeSpan Cutoff, decimal RangeMin, decimal RangeMax,
+        VwapRule Vwap, decimal BreakoutPoints, decimal VolumeMultiplier, bool Retest);
     private static readonly Dictionary<TradeKey, SimulatedTrade?> TradeCache = new();
+    private static readonly Dictionary<EntryKey, (int SignalIndex, TradeDirection Side)?> EntryCache = new();
+
+    // Both caches are scoped to the currently loaded candle dataset.
+    // Restarting a backtest with updated SQL rows must not reuse old outcomes.
+    public static void ClearCaches()
+    {
+        EntryCache.Clear();
+        TradeCache.Clear();
+    }
 
     private sealed record DayOutcome(DateOnly Day, SimulatedTrade? First, SimulatedTrade? Reversal);
 
@@ -141,7 +153,7 @@ public static class OptimizationEngine
 
         foreach (var session in sessions)
         {
-            var signal = FindFirstEntry(session, config);
+            var signal = FindFirstEntryCached(session, config);
             if (signal is not { } entry)
             {
                 outcomes.Add(new DayOutcome(session.Day, null, null));
@@ -229,6 +241,23 @@ public static class OptimizationEngine
         peak = Math.Max(peak, balance);
         result.MaxDrawdown = Math.Max(result.MaxDrawdown, peak - balance);
         result.DetailedTrades?.Add(trade);
+    }
+
+    // Entry detection depends only on signal filters, NOT position size,
+    // initial risk, stop trailing or Stage-6 MES quantity. The grid repeats
+    // each signal-filter combination across those 48 risk/position variants.
+    // Reuse the first signal instead of rescanning minute candles each time.
+    private static (int SignalIndex, TradeDirection Side)? FindFirstEntryCached(
+        SessionData day, OptimizationConfig config)
+    {
+        var key = new EntryKey(day.Day, config.Cutoff, config.Range.Min,
+            config.Range.Max, config.Vwap, config.BreakoutPoints,
+            config.VolumeMultiplier, config.Retest);
+        if (EntryCache.TryGetValue(key, out var entry))
+            return entry;
+        entry = FindFirstEntry(day, config);
+        EntryCache.Add(key, entry);
+        return entry;
     }
 
     private static (int SignalIndex, TradeDirection Side)? FindFirstEntry(

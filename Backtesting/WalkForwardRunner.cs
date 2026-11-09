@@ -26,10 +26,19 @@ public static class WalkForwardRunner
         var directory = Path.Combine(BacktestRunner.FindRoot(), "data");
         Directory.CreateDirectory(directory);
 
-        var firstDay = DateOnly.FromDateTime(MarketTime.ToEastern(bars[0].T).Date);
-        var lastDay = DateOnly.FromDateTime(MarketTime.ToEastern(bars[^1].T).Date);
-        // The curated schedule covers the full first-year SQL data window;
-        // do not silently imply event filters are complete for unseen years.
+        var sessions = OptimizationData.Prepare(bars, allContractBars ?? bars)
+            .Where(s => s.Range is not null)
+            .OrderBy(s => s.Day).ToArray();
+        if (sessions.Length < 20)
+        {
+            Console.Error.WriteLine("Walk-forward needs >=20 sessions with complete 9:30-9:45 opening ranges. Found " + sessions.Length);
+            return 2;
+        }
+
+        // Validate economic-calendar coverage against actual eligible trading
+        // days, not Sunday-evening futures candles that belong to Monday's session.
+        var firstDay = sessions[0].Day;
+        var lastDay = sessions[^1].Day;
         if (firstDay < new DateOnly(2025, 10, 6) ||
             lastDay > new DateOnly(2026, 10, 30))
             Console.WriteLine(
@@ -39,17 +48,8 @@ public static class WalkForwardRunner
                 "using event-filter optimization across an expanded dataset.");
         else
             Console.WriteLine(
-                "Historical economic-release calendar covers this SQL dataset " +
+                "Historical economic-release calendar covers eligible SQL sessions " +
                 "(2025-10-06 through 2026-10-30).");
-
-        var sessions = OptimizationData.Prepare(bars, allContractBars ?? bars)
-            .Where(s => s.Range is not null)
-            .OrderBy(s => s.Day).ToArray();
-        if (sessions.Length < 20)
-        {
-            Console.Error.WriteLine("Walk-forward needs >=20 sessions with complete 9:30-9:45 opening ranges. Found " + sessions.Length);
-            return 2;
-        }
 
         var folds = WalkForwardFold.Create(sessions.Length);
         Console.WriteLine("Complete opening-range sessions: " + sessions.Length);

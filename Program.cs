@@ -17,6 +17,7 @@ try
         .SetBasePath(root)
         .AddJsonFile("appsettings.json", optional: true)
         .AddJsonFile($"appsettings.{environment}.json", optional: true)
+        .AddJsonFile("appsettings.Local.json", optional: true)
         .AddUserSecrets("dotnet-Backtest_for_new_orb-91f535b9-437c-4a70-ae84-ee85729d8eb9")
         .AddEnvironmentVariables()
         .Build();

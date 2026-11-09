@@ -29,6 +29,11 @@ public static class MultiStrategySelfTests
             var nightAudit = MultiStrategyData.Build(missingNight, missingNight, folder);
             Ensure(nightAudit.Count == 1 && nightAudit[0].Overnight is null,
                 "Missing overnight minutes must exclude only overnight trading.");
+            var missingAudit = File.ReadAllLines(Path.Combine(folder,
+                "multi_strategy_data_quality.csv"));
+            Ensure(missingAudit[1].Split(',')[4] == "929" &&
+                   missingAudit[1].Contains("overnight_first_missing_"),
+                   "Overnight audit must count all observed minutes and identify its first gap.");
 
             var mutated = bars.Select(b => b.T == session.Rth[300].T
                 ? b with { C = new Candle {
@@ -47,8 +52,9 @@ public static class MultiStrategySelfTests
                    "13:00 routing features must not depend on post-13:00 candles.");
 
             var variants = MultiStrategyEngine.EnumerateVariants();
-            Ensure(variants.Count == variants.Select(x => x.Id).Distinct().Count(),
-                "Variant IDs must be unique.");
+            Ensure(variants.Count == variants.Select(x => x.Id).Distinct().Count() &&
+                   variants.Count == 416,
+                "Candidate grid must contain all 416 unique, reviewed variants.");
             Ensure(Enum.GetValues<MultiStrategyKind>().All(
                 k => variants.Any(v => v.Kind == k)),
                 "Every intended strategy must have candidate configurations.");
@@ -76,12 +82,14 @@ public static class MultiStrategySelfTests
             }
             foreach (var variant in variants.Where(v =>
                 v.Kind is MultiStrategyKind.MorningMomentum or
-                    MultiStrategyKind.MorningVwapReversion))
+                    MultiStrategyKind.MorningVwapReversion or
+                    MultiStrategyKind.OvernightMomentum or
+                    MultiStrategyKind.OvernightReversion))
             {
                 var before = MultiStrategyEngine.GenerateDay(variant, session);
                 var after = MultiStrategyEngine.GenerateDay(variant, future);
                 Ensure(Equals(before, after),
-                    "Morning trades must be independent of post-13:00 market data.");
+                    "Morning and overnight trades must be independent of later RTH bars.");
             }
 
             var start = MarketTime.ToUtc(date, new TimeOnly(11, 0));

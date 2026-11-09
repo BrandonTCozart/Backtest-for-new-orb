@@ -370,7 +370,8 @@ public static class WalkForwardRunner
             "; costs $" + F(fullBest.Costs));
         Console.WriteLine("Trades: " + fullBest.EsTrades + " ES, " +
             fullBest.MesTrades + " MES proxy; wins " +
-            fullBest.WinningTrades + "; maximum closed-trade drawdown $" +
+            fullBest.WinningTrades + " (" + F(WinRatePercent(fullBest)) +
+            "%); maximum closed-trade drawdown $" +
             F(fullBest.MaxDrawdown));
         foreach (var line in HumanSettings(fullBest.Config).Split("; "))
             Console.WriteLine(line);
@@ -430,6 +431,7 @@ public static class WalkForwardRunner
             "; gross $" + F(fullBest.Gross) + "; costs $" + F(fullBest.Costs));
         summary.Add("Trades: " + fullBest.EsTrades + " ES, " + fullBest.MesTrades +
             " MES proxy; wins " + fullBest.WinningTrades +
+            " (" + F(WinRatePercent(fullBest)) + "%)" +
             "; max closed-trade drawdown $" + F(fullBest.MaxDrawdown));
         summary.Add("Minimum eligible ES trades: " + minimumFullSampleTrades +
             "; qualifying full-dataset configurations: " + eligibleFullCount);
@@ -530,7 +532,8 @@ public static class WalkForwardRunner
                 "; estimated costs: $" + F(fullBest.Costs),
             "ES trades: " + fullBest.EsTrades +
                 "; MES proxy trades: " + fullBest.MesTrades +
-                "; winning trades: " + fullBest.WinningTrades,
+                "; winning trades: " + fullBest.WinningTrades +
+                "; win rate: " + F(WinRatePercent(fullBest)) + "%",
             "Max closed-trade drawdown: $" + F(fullBest.MaxDrawdown),
             HumanSettings(fullBest.Config),
             "Walk-forward OOS P&L (separately selected fold winners): $" +

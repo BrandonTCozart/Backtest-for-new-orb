@@ -63,3 +63,7 @@ nunit-*.xml
 # Historical market-data download checkpoint and temporary files
 /data/*.backfill-complete
 /data/*.tmp
+
+# Local SQL settings and generated historical backtest reports
+appsettings.Local.json
+/data/*.txt

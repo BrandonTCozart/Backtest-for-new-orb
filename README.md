@@ -50,15 +50,16 @@ For **each fold**, all **2,571,264 configurations** are evaluated on its **train
 
 **Only after training selection** is that fold's winner simulated on the immediately following **unseen test block**. The winning settings can differ between folds. Test blocks never overlap, and their P&L is **not used to pick or revise the configurations**.
 
-The optimizer now separately selects **one best overall fixed configuration** from **all 2,571,264 candidates scored across 100% of the available historical sessions**. It ranks qualifying candidates by highest full-dataset net P&L, then lower closed-trade drawdown, then more ES trades, then configuration ID. Qualification requires at least `max(4, ceiling(full sessions / 4))` completed first ES trades. Every optional feature, including weekday and economic-event filters, may be off if another choice ranks better. Full-dataset selection does not change or influence the three walk-forward fold winners.
+The optimizer separately selects **two full-dataset winners** from **all 2,571,264 candidates scored across 100% of the available historical sessions**. The **most profitable** winner is ranked by highest net P&L (then lower closed-trade drawdown, more ES trades and configuration ID). The **highest-win-rate** winner is ranked by winning trades / all completed simulated trades, using an exact ratio without rounding; ties go to higher net P&L, lower drawdown, more ES trades and configuration ID. Both must qualify with at least `max(4, ceiling(full sessions / 4))` first ES trades, to avoid a misleading winner with only a few trades. Win rate includes both ES and optional MES ES-price-proxy trades. Both rankings are **in-sample** and do not change or influence the three walk-forward fold winners.
 
-The report shows **three separate P&L views**:
+The report shows **four different performance views**:
 
 - **Best overall full-dataset configuration:** The highest-ranked qualifying setting from the entire 2,571,264-configuration search, evaluated on all complete opening-range sessions. Its full-sample net P&L, costs, trade counts, drawdown, individual settings and every trade are reported.
+- **Highest full-dataset win rate:** The qualifying candidate with the greatest win percentage; reports its configuration, ES/MES-proxy trade count, net P&L after costs, and drawdown. This is also an in-sample selection, not independent validation.
 - **Full-dataset fold-winner replays:** Separately replay the three configurations originally selected within the walk-forward training folds across all available sessions. **Do not add those totals**, because each covers the same period.
 - **Walk-forward out-of-sample P&L:** Stitches the three immediately following test blocks together, applying the configuration selected for *each* fold. The three test blocks do not overlap.
 
-For each fold, the console prints its **same-configuration full-dataset P&L** directly under that fold's next-block test P&L. The console also prints **BEST OVERALL CONFIGURATION**, with its settings and full-dataset P&L, and a **FULL-DATASET RESULTS** comparison showing the three fold winners. The best overall configuration is not automatically the most recent fold winner, and the stitched out-of-sample result does not measure the full-dataset winner's own out-of-sample performance.
+For each fold, the console prints its **same-configuration full-dataset P&L** directly under that fold's next-block test P&L. The console also prints **BEST OVERALL CONFIGURATION** (by profit) and **HIGHEST WIN-RATE CONFIGURATION**, with each strategy's settings, win rate and full-dataset P&L, and a **FULL-DATASET RESULTS** comparison showing the three fold winners. The best overall configuration is not automatically the most recent fold winner, and the stitched out-of-sample result does not measure the full-dataset winner's own out-of-sample performance.
 
 The original entry/exit parameter grid remains unchanged: entry cutoff (10:00, 10:30, 11:00, or 16:00 ET), all 31 nonempty weekday combinations, opening-range width filters, VWAP confirmation, breakout price buffer, relative volume, retest option, two initial-risk configurations, ES Stage-5 trails of $150/$250/$350, first position of **1 or 2 ES**, and optional Stage-6 reversal of **0/5/10/20 MES**.
 
@@ -83,11 +84,12 @@ This runs the original Orb stage-based stop rules, **not** the previously tested
 
 ## Results
 
-The console displays the **best overall configuration based on the entire historical dataset** and its net P&L, trade counts, fees, drawdown and settings. Separately, it displays the exact training/test date ranges for each walk-forward fold, the selected training configuration, next-block test results, and the stitched **out-of-sample P&L**. The most recent fold winner is shown separately from the best overall winner.
+The console displays both the **highest-net-profit** configuration and the **highest-win-rate** configuration selected from the same historical dataset, including each strategy's net P&L, win rate, trade counts, fees, drawdown, and settings. Separately, it displays the exact training/test date ranges for each walk-forward fold, the selected training configuration, next-block test results, and the stitched **out-of-sample P&L**. The most recent fold winner is shown separately from the best overall winner.
 
 New CSV/text reports are written to `data`:
 
 - **`optimizer_full_dataset_best_summary.txt`** — best fixed configuration selected from the entire full-dataset grid, its net P&L, drawdown, all settings and number of qualifying candidates.
+- **`optimizer_full_dataset_highest_win_rate_summary.txt`** — highest-win-rate qualifying configuration, its complete settings, win/trade count, net profit after estimated costs and drawdown. Its win rate includes ES plus optional MES proxy trades. Uses the same trade-count eligibility as the max-profit winner.
 - **`optimizer_full_dataset_best_trades.csv`** — all trades and cumulative P&L for the full-dataset optimized winner.
 - **`optimizer_walk_forward_folds.csv`** — each fold's selected settings, training results, immediately following test results, dates, trade counts, and full-dataset comparison metrics.
 - **`optimizer_full_sample_comparison.csv`** — three rows, one per selected fold winner, with the fixed configuration's **full-dataset** net P&L, fees, trades, wins, drawdown, and its corresponding next-block test P&L.

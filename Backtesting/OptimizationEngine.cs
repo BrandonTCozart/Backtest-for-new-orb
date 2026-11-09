@@ -64,21 +64,64 @@ public static class OptimizationEngine
                     Id = checked(((baseConfig.Id - 1) * WeekdaySelection.All +
                         (mask - 1)) * 4 + (int)rule + 1)
                 };
-                for (var foldIndex = 0; foldIndex < folds.Count; foldIndex++)
-                {
-                    var fold = folds[foldIndex];
-                    yield return (foldIndex,
-                        AggregateRange(candidate, outcomes, fold.TrainingStart,
-                            fold.TrainingEnd, keepTrades: false));
-                }
-                // Also optimize the same configuration space over all available
-                // sessions to select one fixed best-overall configuration.
-                yield return (folds.Count,
-                    AggregateRange(candidate, outcomes, 0,
-                        outcomes.Count, keepTrades: false));
+
+                // The training folds are chronological prefixes (0..end).
+                // Score all 3 fold prefixes and the full sample in ONE pass
+                // instead of rescanning the same days four times.
+                var scores = AggregateTrainingPrefixes(candidate, outcomes, folds);
+                for (var foldIndex = 0; foldIndex < scores.Length; foldIndex++)
+                    yield return (foldIndex, scores[foldIndex]);
             }
         }
     }
+
+    private static OptimizationResult[] AggregateTrainingPrefixes(
+        OptimizationConfig config,
+        IReadOnlyList<DayOutcome> days,
+        IReadOnlyList<WalkForwardFold> folds)
+    {
+        var snapshots = new OptimizationResult[folds.Count + 1];
+        var running = new OptimizationResult { Config = config };
+        decimal balance = 0m, peak = 0m;
+        var nextFold = 0;
+
+        for (var index = 0; index < days.Count; index++)
+        {
+            AccumulateDay(config, days[index], running, ref balance, ref peak);
+
+            // Each snapshot must be independent: the accumulator continues
+            // through later dates, but fold winners must not change.
+            while (nextFold < folds.Count &&
+                   index + 1 == folds[nextFold].TrainingEnd)
+            {
+                if (folds[nextFold].TrainingStart != 0)
+                    throw new InvalidOperationException(
+                        "Prefix scoring requires expanding-window folds beginning at index zero.");
+                snapshots[nextFold] = CopyScore(running);
+                nextFold++;
+            }
+        }
+
+        if (nextFold != folds.Count)
+            throw new InvalidOperationException(
+                "Training folds must have strictly increasing endpoints within the historical sessions.");
+        snapshots[folds.Count] = running;
+        return snapshots;
+    }
+
+    private static OptimizationResult CopyScore(OptimizationResult value) => new()
+    {
+        Config = value.Config,
+        Net = value.Net,
+        Gross = value.Gross,
+        Costs = value.Costs,
+        MaxDrawdown = value.MaxDrawdown,
+        EsTrades = value.EsTrades,
+        MesTrades = value.MesTrades,
+        WinningTrades = value.WinningTrades,
+        SkippedDays = value.SkippedDays,
+        DetailedTrades = value.DetailedTrades is null ? null : [.. value.DetailedTrades]
+    };
 
     private static void Validate(OptimizationConfig config)
     {
@@ -143,38 +186,49 @@ public static class OptimizationEngine
         decimal balance = 0m, peak = 0m;
 
         for (var dayIndex = start; dayIndex < end; dayIndex++)
-        {
-            var day = days[dayIndex];
-            if (!WeekdaySelection.Includes(config.WeekdayMask, day.Day.DayOfWeek))
-                continue; // Excluded weekdays do NOT count as skipped sessions.
+            AccumulateDay(config, days[dayIndex], result, ref balance, ref peak);
 
-            if (day.First is null)
-            {
-                result.SkippedDays++;
-                continue;
-            }
-            if (!EconomicCalendar.AllowsEntry(config.EventRule, day.Day, day.First.EntryAt))
-                continue; // The calendar filter excludes this entry on this date.
-            Accumulate(day.First);
-            if (day.Reversal is not null &&
-                EconomicCalendar.AllowsEntry(config.EventRule, day.Day, day.Reversal.EntryAt))
-                Accumulate(day.Reversal);
-        }
         return result;
+    }
 
-        void Accumulate(SimulatedTrade trade)
+    // Used by both prefix training and ordinary replay, keeping the weekday,
+    // economic-calendar, cost, trade-count and drawdown rules identical.
+    private static void AccumulateDay(
+        OptimizationConfig config, DayOutcome day, OptimizationResult result,
+        ref decimal balance, ref decimal peak)
+    {
+        if (!WeekdaySelection.Includes(config.WeekdayMask, day.Day.DayOfWeek))
+            return; // Excluded weekdays do NOT count as skipped sessions.
+
+        if (day.First is null)
         {
-            if (trade.IsMes) result.MesTrades++;
-            else result.EsTrades++;
-            result.Gross += trade.Gross;
-            result.Costs += trade.EstimatedCosts;
-            result.Net += trade.Net;
-            if (trade.Net > 0) result.WinningTrades++;
-            balance += trade.Net;
-            peak = Math.Max(peak, balance);
-            result.MaxDrawdown = Math.Max(result.MaxDrawdown, peak - balance);
-            result.DetailedTrades?.Add(trade);
+            result.SkippedDays++;
+            return;
         }
+
+        if (!EconomicCalendar.AllowsEntry(config.EventRule, day.Day, day.First.EntryAt))
+            return; // The calendar filter excludes this entry on this date.
+
+        AccumulateTrade(day.First, result, ref balance, ref peak);
+        if (day.Reversal is not null &&
+            EconomicCalendar.AllowsEntry(config.EventRule, day.Day, day.Reversal.EntryAt))
+            AccumulateTrade(day.Reversal, result, ref balance, ref peak);
+    }
+
+    private static void AccumulateTrade(
+        SimulatedTrade trade, OptimizationResult result,
+        ref decimal balance, ref decimal peak)
+    {
+        if (trade.IsMes) result.MesTrades++;
+        else result.EsTrades++;
+        result.Gross += trade.Gross;
+        result.Costs += trade.EstimatedCosts;
+        result.Net += trade.Net;
+        if (trade.Net > 0) result.WinningTrades++;
+        balance += trade.Net;
+        peak = Math.Max(peak, balance);
+        result.MaxDrawdown = Math.Max(result.MaxDrawdown, peak - balance);
+        result.DetailedTrades?.Add(trade);
     }
 
     private static (int SignalIndex, TradeDirection Side)? FindFirstEntry(

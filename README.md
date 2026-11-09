@@ -1,39 +1,39 @@
 # ORB Full-Dataset Optimizer + Walk-Forward Test
 
-Open **`Backtest for new orb.slnx`** in Visual Studio, pull the latest changes and press **Play**. Startup **downloads the available TopstepX ES 1-minute candle history to a new CSV first**, then runs the existing full-dataset optimization and expanding-window walk-forward tests. All the existing optimizer and reporting functionality remains. The live `Orb` trading repository remains unchanged.
+Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The program now **reads its market candles directly from SQL Server `dbo.MES_DATA`**, the same table used by `BrandonTCozart/orb-analysis`. It then runs the **existing full-dataset parameter search and expanding-window walk-forward tests** unchanged. It does **not** fetch Topstep history or read candle CSV files at startup, and it never places live orders. The original download/legacy CSV utilities remain in source but are not called by Play.
 
-## Automatically download TopstepX 1-minute ES history
+## Configure SQL Server once
 
-**Credentials:** The backtester reads the **original backtest project's Visual Studio User Secrets store** (the same `UserSecretsId` used by its original historical downloader). It also supports the separate Orb secrets store and the temporary backtest secrets ID from later revisions. **Existing `secrets.json` credentials do not need to be re-entered or copied into source code.**
-
-If you want separate backtest credentials instead, right-click the backtest project → **Manage User Secrets** and use:
+Like `orb-analysis`, this project reads **`ConnectionStrings:MarketData`**. The connection string is not stored in GitHub. Add a local **`appsettings.Development.json`** file next to the backtest project's `.csproj` (this filename is ignored by Git), using the **same SQL connection string that works in `orb-analysis`**:
 
 ```json
 {
-  "Topstep": {
-    "UserName": "YOUR_TOPSTEPX_LOGIN",
-    "ApiKey": "YOUR_TOPSTEPX_API_KEY"
+  "ConnectionStrings": {
+    "MarketData": "PASTE_YOUR_WORKING_ORB_ANALYSIS_SQL_CONNECTION_STRING"
   }
 }
 ```
 
-Alternatively set the Windows user environment variables `TOPSTEP_USERNAME` and `TOPSTEP_API_KEY`. User Secrets and environment variables are kept outside this repository. Do not put API keys in committed source files.
+Alternatively, store `ConnectionStrings:MarketData` using Visual Studio **Manage User Secrets**, or provide the environment variable `ConnectionStrings__MarketData`. Environment variables override local JSON; no login information is added to source control.
 
-Every time you press **Start**, the downloader authenticates to the ProjectX/TopstepX API and saves/updates `data/es_1m_max_available.csv`. It uses the **read-only** `/api/Contract/available` and `/api/History/retrieveBars` endpoints; it cannot place or modify orders. It requests one-minute OHLCV history for successive quarterly ES contracts, in 12-day windows (under the API's 20,000-bars-per-request maximum), respects rate limits, merges existing candles and retains a single ES contract per Eastern trading day.
+`appsettings.json` provides the input defaults:
 
-The **first successful download scans backward through historical quarters**, ending after eight consecutive quarters without retrievable minute data (or the beginning of ES contract history). Because TopstepX may not retain expired-contract one-minute history, the actual oldest date depends on the API. Subsequent starts refresh the latest candles; delete `data/es_1m_max_available.backfill-complete` to force a full historical rescan. The downloader prints dates, candle counts and which contracts supplied data.
+```json
+{
+  "MarketData": {
+    "Symbol": "MES",
+    "TimestampTimeZone": "America/New_York"
+  }
+}
+```
 
-The original `data/es_1m_3months.csv` file remains unchanged. The optimizer **prefers the new `es_1m_max_available.csv`**, falling back to the original CSV if history downloading is unavailable. If credentials are not configured, the downloader prints setup instructions and still runs the existing backtest on the local CSV.
+- **Table**: `dbo.MES_DATA` with columns `ts_event`, `symbol`, `open`, `high`, `low`, `close`, `volume`. All matching rows are loaded in chronological order; the date range is whatever is actually available in SQL.
+- **Symbol**: `MES`, matching `orb-analysis`'s default request. Set `MarketData:Symbol` if your table uses another symbol.
+- **Time zone**: `America/New_York` interprets `ts_event` as Eastern wall-clock time, the way `orb-analysis` currently uses it for the 9:30 market open. **If your database actually stores UTC timestamps**, change `MarketData:TimestampTimeZone` to `UTC` before running; incorrect settings shift the opening range and invalidate the test.
+- **Pricing**: The source is **MES candles**, but the existing optimizer still evaluates 1–2 **ES-sized** initial positions at $50 per point and optional MES reversal trades at $5 per point. Therefore the ES P&L is a **MES-price proxy**, not an ES execution backtest. No contract-roll metadata is reconstructed from a continuous `MES` symbol.
+- **Output**: All existing optimizer reports and trades are still written to `data/` as CSV/text **results**. Input candle CSV files are no longer needed.
 
-TopstepX API references: [Retrieve historical bars](https://gateway.docs.projectx.com/docs/api-reference/market-data/retrieve-bars/) · [Rate limits](https://gateway.docs.projectx.com/docs/getting-started/rate-limits/).
-
-
-
-## Input
-
-The downloader produces `data/es_1m_max_available.csv` (preferred). The existing `data/es_1m_3months.csv` and `data/es_1m_3months_INCOMPLETE.csv` are still supported as fallback inputs; neither is overwritten.
-
-The file must contain `timestamp_utc,contract,open,high,low,close,volume`. The program requires **at least 20 trading sessions with a complete 9:30–9:45 AM ET opening range**. Missing dates in an incomplete download cannot be inferred.
+The SQL query uses a read-only SELECT. It validates chronological timestamps, unique bars, OHLC, and numeric volume. If configuration is missing or no bars match, the program stops with a descriptive error rather than silently analyzing stale CSV data.
 
 ## How the walk-forward test works
 
@@ -76,7 +76,7 @@ All four policies are ranked using **training dates only** for each walk-forward
 
 The bundled August–October 2026 calendar has scheduled dates and ET times for **CPI, monthly employment/NFP, PPI, PCE, GDP, FOMC decisions and minutes, ISM manufacturing/services, JOLTS, retail sales, and ECI**. It uses verified schedule dates from [BLS](https://www.bls.gov/schedule/2026/), [BEA](https://www.bea.gov/news/schedule/full), [Federal Reserve](https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm), [ISM](https://www.ismworld.org/supply-management-news-and-reports/reports/rob-report-calendar/) and [Census](https://www.census.gov/retail/release_schedule.html).
 
-The generated `data/optimizer_economic_calendar_2026.csv` lists the precise dates, event names, release times, and source URLs. **Anticipation of Fed moves** is represented by proximity to scheduled FOMC decisions, not an invented historical rate-cut probability. This version does not import point-in-time consensus forecasts, actual economic surprises, unscheduled headlines, or earnings releases. If additional historical data extends beyond October 2026, the bundled calendar must also be extended.
+The generated `data/optimizer_economic_calendar_2026.csv` lists the precise dates, event names, release times, and source URLs. **Anticipation of Fed moves** is represented by proximity to scheduled FOMC decisions, not an invented historical rate-cut probability. This version does not import point-in-time consensus forecasts, actual economic surprises, unscheduled headlines, or earnings releases. If SQL historical data extends beyond October 2026, the bundled calendar must be extended. Otherwise dates without scheduled event records will be treated as non-event days; the console prints a warning whenever the SQL data exceeds the calendar window.
 
 This runs the original Orb stage-based stop rules, **not** the previously tested $500/$450 profit-lock ladder.
 
@@ -115,10 +115,10 @@ Older `optimizer_best_...`, `optimizer_top10_holdout.csv`, and `optimizer_all_co
 
 ## Accuracy and limitations
 
-- ES one-minute OHLC candles do not show quote-by-quote price movement. Market entries are estimated at the next minute's open; stage-based trailing stops update at candle close, and existing stops are assumed touched before favorable wicks in ambiguous candles. Real fills and trading costs may differ.
-- Optional MES Stage-6 trades use ES candles as a **price proxy**, with the MES $5-per-point multiplier; **actual MES prices were not downloaded**. Treat MES P&L as an approximation.
+- MES one-minute OHLC candles do not show quote-by-quote price movement. Market entries are estimated at the next minute's open; stage-based trailing stops update at candle close, and existing stops are assumed touched before favorable wicks in ambiguous candles. Real fills and trading costs may differ.
+- ES-sized initial trades use MES-sourced OHLC and MES volume; the backtest cannot reproduce true ES contract-specific liquidity, volume, fills, or roll behavior. Optional MES Stage-6 trades are simulated on MES-sourced candles using the MES $5-per-point multiplier. Treat all simulated P&L as estimates.
 - Estimated round-trip cost is **$10 per contract**, as in the prior simulation. The reported drawdown is calculated on **closed-trade equity**, not intratrade swings.
 - The event-calendar policies are applied without using release outcomes, and train/test date boundaries remain chronological.
 - Each base configuration's daily trade outcomes are computed once and reused for the 31 weekday filters and four economic-event policies and all three folds. Progress is printed every 100 base configurations. The optimizer may take a long time; stopping early leaves only a partial all-configurations CSV.
 
-**Development status:** Automatic historical-download startup, full-dataset optimization and walk-forward evaluation are committed to GitHub. An authenticated TopstepX account and local .NET build are required to verify the actual available history; this environment has not executed the download or build.
+**Development status:** SQL Server candle loading is now the default start-up path. The historical-download code remains for reference but is no longer run by pressing Play. This environment cannot access your local SQL Server or execute a .NET build, so the new query and backtest must be verified in Visual Studio.

@@ -1,33 +1,34 @@
 using Backtest_for_new_orb;
+using Microsoft.Extensions.Configuration;
 
-// Pressing Play updates available historical ES candles first, then runs
-// the existing full-dataset optimizer and expanding-window walk-forward test.
+// Press Play to load the same SQL Server candle table as orb-analysis, then
+// run the unchanged full-dataset optimizer and expanding-window walk-forward tests.
 try
 {
-    var directory = Path.Combine(BacktestRunner.FindRoot(), "data");
-    try
-    {
-        await TopstepHistoryDownloader.RunAsync(directory);
-    }
-    catch (Exception error)
-    {
-        Console.Error.WriteLine("TopstepX historical download failed: " + error.Message);
-        Console.Error.WriteLine("Continuing with existing local ES candles.");
-    }
+    var root = BacktestRunner.FindRoot();
+    var environment = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT")
+        ?? Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
+        ?? "Production";
 
-    // On a clean data folder, a successful download must create the dataset.
-    // Keep supporting all original CSV inputs when they already exist.
-    if (!new[] {
-            TopstepHistoryDownloader.OutputName,
-            "es_1m_3months.csv",
-            "es_1m_3months_INCOMPLETE.csv"
-        }.Any(name => File.Exists(Path.Combine(directory, name))))
-    {
-        Console.Error.WriteLine("No ES historical CSV is available. The TopstepX download did not create one.");
-        return 1;
-    }
+    var configuration = new ConfigurationBuilder()
+        .SetBasePath(root)
+        .AddJsonFile("appsettings.json", optional: true)
+        .AddJsonFile($"appsettings.{environment}.json", optional: true)
+        .AddUserSecrets("dotnet-Backtest_for_new_orb-91f535b9-437c-4a70-ae84-ee85729d8eb9")
+        .AddEnvironmentVariables()
+        .Build();
 
-    return WalkForwardRunner.Run();
+    var symbol = configuration["MarketData:Symbol"] ?? "MES";
+    var timeZone = configuration["MarketData:TimestampTimeZone"] ?? "America/New_York";
+    Console.WriteLine($"Reading dbo.MES_DATA from SQL Server; symbol='{symbol}'; stored-timezone={timeZone}");
+    Console.WriteLine("Data are MES candles; optimizer retains its original ES-dollar and MES-proxy trade assumptions.");
+
+    var bars = await SqlMarketDataLoader.LoadAsync(
+        configuration.GetConnectionString("MarketData"), symbol, timeZone);
+    Console.WriteLine($"SQL candles loaded: {bars.Count:N0}");
+    Console.WriteLine($"SQL candle range (UTC): {bars[0].T:O} to {bars[^1].T:O}");
+
+    return WalkForwardRunner.Run(bars);
 }
 catch (Exception error)
 {

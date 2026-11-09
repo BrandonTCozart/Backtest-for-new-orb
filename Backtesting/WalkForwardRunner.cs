@@ -28,14 +28,19 @@ public static class WalkForwardRunner
 
         var firstDay = DateOnly.FromDateTime(MarketTime.ToEastern(bars[0].T).Date);
         var lastDay = DateOnly.FromDateTime(MarketTime.ToEastern(bars[^1].T).Date);
-        // The event calendar is hardcoded for Aug-Oct 2026, not a complete
-        // historical release feed. Report when the SQL dataset exceeds it.
-        if (firstDay < new DateOnly(2026, 8, 3) ||
+        // The curated schedule covers the full first-year SQL data window;
+        // do not silently imply event filters are complete for unseen years.
+        if (firstDay < new DateOnly(2025, 10, 6) ||
             lastDay > new DateOnly(2026, 10, 30))
             Console.WriteLine(
-                "WARNING: Economic release calendar is only populated for Aug-Oct 2026. " +
-                "Event-filter scores outside that range treat missing events as normal days; " +
-                "extend Backtesting/EconomicCalendar.cs before relying on those filters.");
+                "WARNING: The embedded economic release calendar spans " +
+                "2025-10-06 through 2026-10-30. Dates outside this window have " +
+                "unknown events. Expand Backtesting/EconomicCalendar.cs before " +
+                "using event-filter optimization across an expanded dataset.");
+        else
+            Console.WriteLine(
+                "Historical economic-release calendar covers this SQL dataset " +
+                "(2025-10-06 through 2026-10-30).");
 
         var sessions = OptimizationData.Prepare(bars, allContractBars ?? bars)
             .Where(s => s.Range is not null)
@@ -76,7 +81,7 @@ public static class WalkForwardRunner
         var optimalFullTradesPath = Path.Combine(directory, "optimizer_full_dataset_best_trades.csv");
         var optimalFullSummaryPath = Path.Combine(directory, "optimizer_full_dataset_best_summary.txt");
         EconomicCalendar.WriteCalendarCsv(directory);
-        Console.WriteLine("Economic release schedule: " + Path.Combine(directory, "optimizer_economic_calendar_2026.csv"));
+        Console.WriteLine("Economic release schedule: " + Path.Combine(directory, "optimizer_economic_calendar_2025_2026.csv"));
 
         var winningTraining = new OptimizationResult?[folds.Length];
         var eligibleCount = new long[folds.Length];

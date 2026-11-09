@@ -102,6 +102,55 @@ public static class MultiStrategySelfTests
                    EconomicCalendar.Events(new DateOnly(2026, 8, 7)).Any(e => e.Code == "NFP"),
                 "Historical economic-calendar coverage should not silently disappear.");
 
+            // End-to-end dry run: 25 complete synthetic ES sessions exercise the
+            // entire candidate grid, all three walk-forward folds, causal router,
+            // CSV serialization and sequential no-overlap portfolio construction.
+            // No database is accessed, and no orders or network requests occur.
+            var sampleDays = Enumerable.Range(0, 36)
+                .Select(i => new DateOnly(2026, 8, 3).AddDays(i))
+                .Where(d => d.DayOfWeek is not DayOfWeek.Saturday and not DayOfWeek.Sunday)
+                .Take(25).ToArray();
+            var syntheticYear = sampleDays.SelectMany(CreateFullSession)
+                .OrderBy(b => b.T).ToList();
+            Ensure(MultiStrategyRunner.Run(syntheticYear, syntheticYear, folder) == 0,
+                "Complete synthetic multi-strategy backtest should return success.");
+            var reportFolder = Path.Combine(folder, "data");
+            foreach (var required in new[] {
+                "multi_strategy_summary.txt",
+                "multi_strategy_data_quality.csv",
+                "multi_strategy_full_sample_winners.csv",
+                "multi_strategy_candidate_scores.csv",
+                "multi_strategy_individual_walkforward.csv",
+                "multi_strategy_portfolio_walkforward.csv",
+                "multi_strategy_portfolio_trades.csv",
+                "multi_strategy_portfolio_monthly.csv"
+            })
+                Ensure(File.Exists(Path.Combine(reportFolder, required)),
+                    "Missing completed research report: " + required);
+
+            var oosRows = File.ReadAllLines(Path.Combine(reportFolder,
+                    "multi_strategy_portfolio_trades.csv")).Skip(1)
+                .Select(x => x.Split(',')).ToArray();
+            foreach (var dayGroup in oosRows.GroupBy(x => x[1]))
+            {
+                var previousExit = DateTimeOffset.MinValue;
+                var count = 0;
+                foreach (var row in dayGroup.OrderBy(x =>
+                    DateTimeOffset.Parse(x[6], System.Globalization.CultureInfo.InvariantCulture)))
+                {
+                    var entry = DateTimeOffset.Parse(row[6],
+                        System.Globalization.CultureInfo.InvariantCulture);
+                    var exit = DateTimeOffset.Parse(row[7],
+                        System.Globalization.CultureInfo.InvariantCulture);
+                    Ensure(entry >= previousExit && exit > entry,
+                        "Portfolio must never overlap two positions.");
+                    previousExit = exit;
+                    count++;
+                }
+                Ensure(count <= 3, "Maximum three sequential trades per trading date.");
+            }
+
+            Console.WriteLine("PASS: full 25-session synthetic walk-forward and all report outputs.");
             Console.WriteLine("PASS: synthetic full/missing RTH and overnight minute coverage,");
             Console.WriteLine("      lookahead boundary checks, trade risk/close-time invariants,");
             Console.WriteLine("      seven strategy candidate families, P&L and event-calendar checks.");

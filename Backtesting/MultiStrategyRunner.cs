@@ -524,6 +524,25 @@ public static class MultiStrategyRunner
                 .ThenBy(c => c.Variant.Id)
                 .First().Variant.Kind);
 
+        // In adaptive mode, the best strategy for each slot and regime
+        // is fitted on TRAINING only; no same-day P&L decides the route.
+        var bestByRegime = winners.Values
+            .Where(c => c.Score.Net > 0m)
+            .GroupBy(c => (Slot: c.Variant.Slot,
+                           Trend: IsTrendStrategy(c.Variant.Kind)))
+            .ToDictionary(g => g.Key, g => g
+                .OrderByDescending(c => c.Robustness)
+                .ThenByDescending(c => c.Score.Net)
+                .ThenBy(c => c.Variant.Id)
+                .First().Variant.Kind);
+
+        void ChooseRegime(List<MultiStrategyKind> wanted,
+            MultiStrategySlot slot, bool trend)
+        {
+            if (bestByRegime.TryGetValue((slot, trend), out var selected))
+                wanted.Add(selected);
+        }
+
         for (var i = from; i < to; i++)
         {
             var day = sessions[i];
@@ -542,26 +561,24 @@ public static class MultiStrategyRunner
                     break;
                 case MultiPortfolioMode.AdaptiveRegimes:
                     if (day.Overnight is not null && day.FirstHourOvernightAtr > 0m)
-                        wanted.Add(Math.Abs(day.FirstHourOvernightMove) >=
-                            policy.NightThreshold * day.FirstHourOvernightAtr
-                            ? MultiStrategyKind.OvernightMomentum :
-                              MultiStrategyKind.OvernightReversion);
+                        ChooseRegime(wanted, MultiStrategySlot.Overnight,
+                            Math.Abs(day.FirstHourOvernightMove) >=
+                            policy.NightThreshold * day.FirstHourOvernightAtr);
+
                     if (day.EarlyAtr > 0m)
                     {
-                        if (day.OpeningWidth >= policy.OrbThreshold * day.EarlyAtr &&
-                            day.EarlyVolumeRatio >= 0.8m)
-                            wanted.Add(MultiStrategyKind.Orb);
-                        else if (Math.Abs(day.OpeningMove) >=
-                                 policy.MorningThreshold * day.EarlyAtr)
-                            wanted.Add(MultiStrategyKind.MorningMomentum);
-                        else
-                            wanted.Add(MultiStrategyKind.MorningVwapReversion);
+                        var trending = day.OpeningWidth >=
+                            policy.OrbThreshold * day.EarlyAtr &&
+                            day.EarlyVolumeRatio >= 0.8m ||
+                            Math.Abs(day.OpeningMove) >=
+                            policy.MorningThreshold * day.EarlyAtr;
+                        ChooseRegime(wanted, MultiStrategySlot.Morning, trending);
                     }
+
                     if (day.AfternoonAtr > 0m)
-                        wanted.Add(Math.Abs(day.AfternoonMove) >=
-                            policy.AfternoonThreshold * day.AfternoonAtr
-                            ? MultiStrategyKind.AfternoonMomentum :
-                              MultiStrategyKind.AfternoonVwapReversion);
+                        ChooseRegime(wanted, MultiStrategySlot.Afternoon,
+                            Math.Abs(day.AfternoonMove) >=
+                            policy.AfternoonThreshold * day.AfternoonAtr);
                     break;
             }
 
@@ -589,6 +606,20 @@ public static class MultiStrategyRunner
         }
         return new PortfolioOutcome(policy, MultiScore.From(chosenTrades), chosenTrades);
     }
+
+    // Directional breakout/extension/retest families are trend-following;
+    // bounce, liquidity-sweep, Fibonacci retracement and VWAP reversion
+    // are range/reversal candidates. Morning/afternoon are independent.
+    private static bool IsTrendStrategy(MultiStrategyKind kind) => kind is
+        MultiStrategyKind.Orb or
+        MultiStrategyKind.MorningMomentum or MultiStrategyKind.AfternoonMomentum or
+        MultiStrategyKind.OvernightMomentum or
+        MultiStrategyKind.MorningSupportResistanceBreakout or
+        MultiStrategyKind.AfternoonSupportResistanceBreakout or
+        MultiStrategyKind.MorningBreakoutRetest or
+        MultiStrategyKind.AfternoonBreakoutRetest or
+        MultiStrategyKind.MorningFibonacciExtension or
+        MultiStrategyKind.AfternoonFibonacciExtension;
 
     private static bool HigherWinRate(MultiScore a, int idA, MultiScore b, int idB)
     {

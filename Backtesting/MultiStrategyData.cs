@@ -13,10 +13,20 @@ public enum MultiStrategyKind
     AfternoonMomentum,
     AfternoonVwapReversion,
     OvernightMomentum,
-    OvernightReversion
+    OvernightReversion,
+    SupportResistanceBounce,
+    SupportResistanceBreakout,
+    BreakoutRetest,
+    FibonacciRetracement,
+    FibonacciExtension,
+    LiquiditySweep
 }
 
 public enum MultiStrategySlot { Overnight, Morning, Afternoon }
+
+// Reference-price families are only calculated from fully completed candles
+// and historical sessions belonging to the same ES contract.
+public enum PriceLevelSource { OpeningRange, PreviousCompleteRth, Overnight, Rolling }
 
 // Deep is the regular SQL research grid. Smoke is kept small for CI regression
 // tests and short iterations; it must never silently be reported as Deep.
@@ -36,14 +46,18 @@ public sealed record MultiStrategyVariant(
     decimal OrbRangeMax = 10000m,
     bool OrbRetest = false,
     decimal OrbRiskCap = 600m,
-    decimal OrbFallbackRisk = 500m)
+    decimal OrbFallbackRisk = 500m,
+    MultiStrategySlot? ResearchSlot = null,
+    PriceLevelSource LevelSource = PriceLevelSource.OpeningRange,
+    decimal FibRatio = 0.618m,
+    int RetestBars = 8)
 {
-    public MultiStrategySlot Slot => Kind switch
+    public MultiStrategySlot Slot => ResearchSlot ?? (Kind switch
     {
         MultiStrategyKind.OvernightMomentum or MultiStrategyKind.OvernightReversion => MultiStrategySlot.Overnight,
         MultiStrategyKind.AfternoonMomentum or MultiStrategyKind.AfternoonVwapReversion => MultiStrategySlot.Afternoon,
         _ => MultiStrategySlot.Morning
-    };
+    });
 
     // This is a single CSV field: semicolons separate disclosed settings.
     public string Parameters => string.Join("; ",
@@ -57,7 +71,9 @@ public sealed record MultiStrategyVariant(
         $"RSI_extreme={RsiExtreme}", $"trend_confirmation={TrendConfirmation}",
         $"ORB_vwap={OrbVwap}", $"ORB_range={OrbRangeMin}-{OrbRangeMax}",
         $"ORB_retest={OrbRetest}", $"ORB_initial_risk_cap={OrbRiskCap}",
-        $"ORB_fallback_risk={OrbFallbackRisk}");
+        $"ORB_fallback_risk={OrbFallbackRisk}",
+        $"research_slot={Slot}", $"reference_source={LevelSource}",
+        $"fib_ratio={FibRatio}", $"retest_window_bars={RetestBars}");
 }
 
 public sealed class MultiIndicators
@@ -112,6 +128,9 @@ public sealed class MultiSession
     public required MultiIndicators? OvernightIndicators { get; init; }
 
     // All values below are available by their particular session's decision time.
+    public decimal? PriorCompleteRthHigh { get; init; }
+    public decimal? PriorCompleteRthLow { get; init; }
+    public DateOnly? PriorCompleteRthDate { get; init; }
     public required decimal OpeningWidth { get; init; } // 9:45 ET
     public required decimal EarlyAtr { get; init; } // 9:45 ET
     public required decimal EarlyVolumeRatio { get; init; } // 9:45 ET
@@ -193,6 +212,12 @@ public static class MultiStrategyData
                 continue;
             }
 
+            var prior = valid.Count > 0 ? valid[^1] : null;
+            // Prior complete US trading session only, same contract, within
+            // four calendar days (weekends/most exchange holidays included).
+            var hasPrior = prior is not null &&
+                string.Equals(prior.Contract, contract, StringComparison.OrdinalIgnoreCase) &&
+                day.DayNumber - prior.Day.DayNumber is >= 1 and <= 4;
             var nightStart = MarketTime.ToUtc(day.AddDays(-1), new TimeOnly(18, 0));
             var nightEnd = rthStart;
             var night = new List<PriceBar>(OvernightMinuteCount);
@@ -227,6 +252,9 @@ public static class MultiStrategyData
             valid.Add(new MultiSession {
                 Day = day,
                 Contract = contract,
+                PriorCompleteRthHigh = hasPrior ? prior!.Rth.Max(x => x.C.H) : null,
+                PriorCompleteRthLow = hasPrior ? prior!.Rth.Min(x => x.C.L) : null,
+                PriorCompleteRthDate = hasPrior ? prior!.Day : null,
                 Rth = rth,
                 Overnight = nightBars,
                 RthIndicators = rthMetrics,

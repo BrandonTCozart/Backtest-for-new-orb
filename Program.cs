@@ -40,7 +40,7 @@ try
     var mode = (configuration["Backtest:Mode"] ?? "Multi")
         .Trim().ToLowerInvariant();
     Console.WriteLine("Backtest mode: " + mode +
-        " (Multi=7 strategy types; Orb=original exhaustive optimizer; Both=run both).");
+        " (Multi=19 strategy families with console-only reports; Orb=original exhaustive optimizer; Both=run both).");
     switch (mode)
     {
         case "multi":
@@ -49,7 +49,7 @@ try
             return WalkForwardRunner.Run(bars, marketData.AllContractBars);
         case "both":
         {
-            // New cross-strategy result is saved before the longer full ORB grid.
+            // Console-only multi-strategy results precede the original ORB optimizer.
             var multiExit = MultiStrategyRunner.Run(
                 bars, marketData.AllContractBars, root, searchProfile);
             if (multiExit != 0) return multiExit;

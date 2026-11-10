@@ -190,6 +190,50 @@ public static class MultiStrategySelfTests
             }
 
             TestWeeklyTotals(date);
+            Ensure(SqlMarketDataLoader.ValidateTableName("MES_DATA") == "MES_DATA" &&
+                   SqlMarketDataLoader.ValidateTableName("MES_DATA_2020_2025") ==
+                       "MES_DATA_2020_2025",
+                "Both historical replay SQL table names must be supported.");
+            try
+            {
+                _ = SqlMarketDataLoader.ValidateTableName("MES_DATA];DROP TABLE Users;--");
+                throw new InvalidOperationException(
+                    "Untrusted SQL identifier was unexpectedly accepted.");
+            }
+            catch (ArgumentException) { }
+
+            // Regression of frozen historical replay: no SQL, no new fit on
+            // historical candles, no file outputs, full weekly reconciliation.
+            var frozen = HistoricalReplayRunner.BuildPlan(
+                syntheticYear, syntheticYear);
+            Ensure(frozen.Choices.Count == 19 &&
+                   frozen.Choices.All(x =>
+                       x.Value.Variant.Id == HistoricalReplayRunner.PinnedIds[x.Key]),
+                "Replay must resolve every pinned Deep-grid fold winner unchanged.");
+            var summaryWriter = Console.Out;
+            using var historyCaptured = new StringWriter();
+            try
+            {
+                Console.SetOut(historyCaptured);
+                Ensure(HistoricalReplayRunner.Replay(frozen,
+                    syntheticYear, syntheticYear) == 0,
+                    "Frozen historical replay must run to completion.");
+            }
+            finally
+            {
+                Console.SetOut(summaryWriter);
+            }
+            var replayOutput = historyCaptured.ToString();
+            Ensure(replayOutput.Split('\n').Count(x =>
+                       x.StartsWith("REPLAY_TOTAL,", StringComparison.Ordinal)) == 22 &&
+                   replayOutput.Split('\n').Count(x =>
+                       x.StartsWith("WEEKLY_REPLAY,", StringComparison.Ordinal)) > 21 &&
+                   replayOutput.Contains("REPLAY_ROUTER,Fixed_best_per_session,") &&
+                   replayOutput.Contains("REPLAY_ROUTER,Fixed_best_per_session_fallback,"),
+                "Historical replay should output each strategy and both router policies.");
+            Ensure(!Directory.Exists(folder) ||
+                   !Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories).Any(),
+                "Frozen historical replay must not write CSV or text files.");
 
             Console.WriteLine("PASS: full 25-session synthetic walk-forward and terminal-only reporting.");
             Console.WriteLine("PASS: synthetic full/missing RTH and overnight minute coverage,");

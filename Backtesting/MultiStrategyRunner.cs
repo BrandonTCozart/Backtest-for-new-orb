@@ -168,6 +168,10 @@ public static class MultiStrategyRunner
         }
 
         var chosenOos = new List<(int Fold, MultiStrategyTrade Trade)>();
+        var bestOriginalRouterOos = new List<MultiStrategyTrade>();
+        var bestFallbackRouterOos = new List<MultiStrategyTrade>();
+        var fallbackRouterFillCount = 0;
+        var initialPortfolioTrades = new List<MultiStrategyTrade>();
         var individualOos = kinds.ToDictionary(k => k,
             _ => new List<MultiStrategyTrade>());
         var individualFoldResults = kinds.ToDictionary(k => k,
@@ -271,6 +275,8 @@ public static class MultiStrategyRunner
             var oos = EvaluatePortfolio(chosenPolicy.Policy, winners, sessions,
                 fold.TestStart, fold.TestEnd);
             chosenOos.AddRange(oos.Trades.Select(t => (fold.Number, t)));
+            if (foldIndex == 0)
+                initialPortfolioTrades.AddRange(chosenPolicy.Training.Trades);
             var message = "Fold " + fold.Number + " PORTFOLIO: " +
                 chosenPolicy.Policy.Description + "; train $" +
                 F(chosenPolicy.Training.Score.Net) + "; next-block OOS $" +
@@ -293,6 +299,9 @@ public static class MultiStrategyRunner
                 sessions, fold.TestStart, fold.TestEnd);
             var originalOos = EvaluatePortfolio(bestOriginal.Policy, winners,
                 sessions, fold.TestStart, fold.TestEnd);
+            bestOriginalRouterOos.AddRange(originalOos.Trades);
+            bestFallbackRouterOos.AddRange(fallbackOos.Trades);
+            fallbackRouterFillCount += fallbackOos.FallbackTrades;
             Console.WriteLine("Fold " + fold.Number + " ROUTING COMPARISON (training-ranked): " +
                 "no fallback $" + F(originalOos.Score.Net) + " (" +
                 originalOos.Score.Trades + " trades); fallback $" +
@@ -323,6 +332,34 @@ public static class MultiStrategyRunner
                         individualFoldResults[kind].Count(x => x > 0m) +
                         "/" + individualFoldResults[kind].Count);
         summary.Add("");
+
+        // The first fold's fitted configuration handles the earliest training
+        // segment; later dates use that fold's training-selected configuration
+        // only for its immediately following OOS block. These two periods are
+        // disjoint, so their combined profit covers the full validated history
+        // exactly once without summing overlapping expanding training windows.
+        var prefixEnd = folds[0].TestStart;
+        var fullPeriodScores = new List<(MultiStrategyKind Kind, MultiScore Is,
+            MultiScore Oos, MultiScore Total)>();
+        foreach (var kind in kinds)
+        {
+            var prefix = new List<MultiStrategyTrade>();
+            if (bestForFold[0].TryGetValue(kind, out var firstChoice))
+                for (var si = 0; si < prefixEnd; si++)
+                    if (firstChoice.Trades.TryGetValue(sessions[si].Day, out var item))
+                        prefix.Add(item);
+            var combined = prefix.Concat(individualOos[kind]).ToArray();
+            if (combined.Select(t => t.Day).Distinct().Count() != combined.Length)
+                throw new InvalidOperationException(
+                    "Full-period strategy P&L double-counted a trading date: " + kind);
+            var prefixScore = MultiScore.From(prefix);
+            var oos = MultiScore.From(individualOos[kind]);
+            var total = MultiScore.From(combined);
+            if (prefixScore.Net + oos.Net != total.Net)
+                throw new InvalidOperationException(
+                    "Full-period P&L did not reconcile for " + kind);
+            fullPeriodScores.Add((kind, prefixScore, oos, total));
+        }
 
         summary.Add("FULL-SAMPLE STRATEGY WINNERS — ALL IN-SAMPLE; minimum ES trades " +
                     minimumFull);
@@ -363,6 +400,18 @@ public static class MultiStrategyRunner
         Console.WriteLine("Cost sensitivity: $20/ES => $" +
             F(SensitiveNet(oosScore, 20m)) +
             "; $30/ES => $" + F(SensitiveNet(oosScore, 30m)));
+        var noFallbackRouterScore = MultiScore.From(bestOriginalRouterOos);
+        var withFallbackRouterScore = MultiScore.From(bestFallbackRouterOos);
+        Console.WriteLine("Training-selected router comparison (stitched OOS):");
+        Console.WriteLine("  No fallback: $" + F(noFallbackRouterScore.Net) +
+            ", trades " + noFallbackRouterScore.Trades + ", max drawdown $" +
+            F(noFallbackRouterScore.Drawdown));
+        Console.WriteLine("  Fallback enabled: $" + F(withFallbackRouterScore.Net) +
+            ", trades " + withFallbackRouterScore.Trades + ", fallback fills " +
+            fallbackRouterFillCount + ", max drawdown $" +
+            F(withFallbackRouterScore.Drawdown));
+        Console.WriteLine("  These are independently training-selected best fixed/adaptive routers;");
+        Console.WriteLine("  selected portfolio can also be a single-strategy router.");
         Console.WriteLine("Standalone strategy OOS (post-hoc comparison, not a fitted portfolio):");
         foreach (var (kind, score) in oosStrategyScores
                      .OrderByDescending(x => x.Score.Net))
@@ -371,6 +420,31 @@ public static class MultiStrategyRunner
                 "%, max closed-trade drawdown $" + F(score.Drawdown) +
                 ", profitable folds " + individualFoldResults[kind].Count(x => x > 0m) +
                 "/" + individualFoldResults[kind].Count);
+
+        Console.WriteLine();
+        Console.WriteLine("=== ALL-HISTORY STRATEGY PNL: IN-SAMPLE PREFIX + STITCHED OOS ===");
+        Console.WriteLine("Initial in-sample prefix " + Day(sessions[0].Day) + " through " +
+            Day(sessions[prefixEnd - 1].Day) + "; later blocks OOS through " +
+            Day(sessions[^1].Day) + ".");
+        Console.WriteLine("Each date is counted once. Configurations can change at fold boundaries.");
+        Console.WriteLine("The all-history total is NOT the full-sample hindsight-optimized best configuration.");
+        Console.WriteLine("TOTAL_PNL,strategy,in_sample_prefix_usd,out_of_sample_usd,total_usd,trades,win_rate_pct,max_closed_trade_drawdown_usd");
+        foreach (var (kind, initial, oos, total) in fullPeriodScores
+                     .OrderByDescending(x => x.Total.Net))
+            Console.WriteLine("TOTAL_PNL," + kind + "," + F(initial.Net) + "," +
+                F(oos.Net) + "," + F(total.Net) + "," + total.Trades + "," +
+                F(total.WinRate) + "," + F(total.Drawdown));
+        var combinedPortfolio = MultiScore.From(initialPortfolioTrades.Concat(
+            oosSorted.Select(x => x.Trade)));
+        var initialPortfolioScore = MultiScore.From(initialPortfolioTrades);
+        if (combinedPortfolio.Net != initialPortfolioScore.Net + oosScore.Net)
+            throw new InvalidOperationException(
+                "All-history selected portfolio P&L does not reconcile.");
+        Console.WriteLine("TOTAL_PNL,SelectedPortfolio," +
+            F(initialPortfolioScore.Net) + "," + F(oosScore.Net) + "," +
+            F(combinedPortfolio.Net) + "," + combinedPortfolio.Trades + "," +
+            F(combinedPortfolio.WinRate) + "," +
+            F(combinedPortfolio.Drawdown));
 
         // The weekly output uses exclusively nonoverlapping, training-selected
         // OOS trades. Calendar grouping is Monday-Sunday in ET, assigning

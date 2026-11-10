@@ -37,7 +37,7 @@ public static class MultiStrategyGrid
         // 4/4/4/4 factors on the non-ORB entry and bracket, with separate
         // RSI and relative-volume/trend dimensions where they have meaning.
         foreach (var kind in Enum.GetValues<MultiStrategyKind>()
-                     .Where(x => x != MultiStrategyKind.Orb))
+                     .Where(x => x != MultiStrategyKind.Orb && !PriceActionSignals.IsPriceAction(x)))
         {
             bool momentum = kind is MultiStrategyKind.MorningMomentum or
                 MultiStrategyKind.AfternoonMomentum or MultiStrategyKind.OvernightMomentum;
@@ -68,6 +68,42 @@ public static class MultiStrategyGrid
                     StartShiftMinutes: shift,
                     RsiExtreme: momentum ? 65m : signalControl,
                     TrendConfirmation: !momentum || signalControl == 1));
+        }
+        // Twelve independent morning/afternoon price-action families:
+        // S/R bounce, S/R breakout, retest, Fibonacci retracement,
+        // Fibonacci extension and liquidity sweep. This is purposefully
+        // explicit; the backtest does not infer profitable levels hindsight.
+        foreach (var kind in Enum.GetValues<MultiStrategyKind>()
+                     .Where(PriceActionSignals.IsPriceAction))
+        {
+            var isFibRetrace = kind is MultiStrategyKind.MorningFibonacciRetracement or
+                MultiStrategyKind.AfternoonFibonacciRetracement;
+            var isFibExtension = kind is MultiStrategyKind.MorningFibonacciExtension or
+                MultiStrategyKind.AfternoonFibonacciExtension;
+            var fib = isFibRetrace || isFibExtension;
+            var retest = kind is MultiStrategyKind.MorningBreakoutRetest or
+                MultiStrategyKind.AfternoonBreakoutRetest;
+            var sources = fib
+                ? new[] { PriceLevelSource.Rolling }
+                : Enum.GetValues<PriceLevelSource>();
+            var ratios = isFibRetrace
+                ? new[] { 0.382m, 0.5m, 0.618m }
+                : isFibExtension
+                    ? new[] { 1.272m, 1.618m }
+                    : new[] { 0.618m };
+            foreach (var lookback in new[] { 20, 40, 60 })
+            foreach (var threshold in new[] { 0.25m, 0.75m })
+            foreach (var source in sources)
+            foreach (var ratio in ratios)
+            foreach (var retestWindow in retest ? new[] { 5, 12 } : new[] { 8 })
+            foreach (var shift in new[] { 0, 30 })
+            foreach (var stopAtr in new[] { 1m, 1.5m })
+            foreach (var reward in new[] { 1m, 1.5m, 2m })
+            foreach (var news in Enum.GetValues<EconomicEventRule>())
+                variants.Add(new MultiStrategyVariant(++id, kind, lookback,
+                    threshold, stopAtr, reward, 0m, 0, 0m, news,
+                    StartShiftMinutes: shift, LevelSource: source,
+                    FibRatio: ratio, RetestBars: retestWindow));
         }
         return variants;
     }

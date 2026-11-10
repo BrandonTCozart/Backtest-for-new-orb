@@ -143,6 +143,10 @@ public sealed class MultiSession
     public decimal? PriorCompleteRthHigh { get; init; }
     public decimal? PriorCompleteRthLow { get; init; }
     public DateOnly? PriorCompleteRthDate { get; init; }
+    public required decimal OpeningHigh { get; init; }
+    public required decimal OpeningLow { get; init; }
+    public decimal? OvernightHigh { get; init; }
+    public decimal? OvernightLow { get; init; }
     public required decimal OpeningWidth { get; init; } // 9:45 ET
     public required decimal EarlyAtr { get; init; } // 9:45 ET
     public required decimal EarlyVolumeRatio { get; init; } // 9:45 ET
@@ -271,6 +275,12 @@ public static class MultiStrategyData
                 Overnight = nightBars,
                 RthIndicators = rthMetrics,
                 OvernightIndicators = nightMetrics,
+                OpeningHigh = earlyHigh,
+                OpeningLow = earlyLow,
+                OvernightHigh = nightBars is null ? null :
+                    nightBars.Max(x => x.C.H),
+                OvernightLow = nightBars is null ? null :
+                    nightBars.Min(x => x.C.L),
                 OpeningWidth = earlyHigh - earlyLow,
                 EarlyAtr = rthMetrics.Atr14[14],
                 EarlyVolumeRatio = earlyVolume > 0m ? laterVolume / earlyVolume : 0m,

@@ -12,7 +12,9 @@ Set `Backtest:Mode` in `appsettings.json` or a local override:
 | `Orb` | Original exhaustive 2,571,264-configuration ORB optimizer and its separate walk-forward reports |
 | `Both` | Run multi-strategy first, then the original exhaustive ORB optimizer |
 
-The new multi-strategy mode uses a **smaller, purpose-built grid** of 416 configurations across seven strategy types to permit repeatable research. It does not replace or prune the existing large ORB search, available under `Orb` or `Both`.
+The default **Deep** multi-strategy search now evaluates **60,160 configurations across seven strategy families** (20,736 staged ORB configurations and 39,424 additional momentum/reversion configurations). The independent **original exhaustive ORB** search is still available under `Orb` or `Both` mode. Deep adds variations of entry windows, moving-average confirmation, VWAP filters, breakout buffers, RSI extremes, relative volume, ATR stops, targets, weekday restrictions, OR width, retests and economic-event rules. The lighter `Smoke` profile (416 candidates) exists only for quick regression/development tests.
+
+Set `Backtest:SearchProfile` to `Deep` (default) or `Smoke` independently of `Backtest:Mode`. There is no automatic early cutoff or maximum runtime; Deep finishes its full disclosed grid before selecting the results.
 
 ## Strategies, trading hours and execution
 
@@ -38,6 +40,8 @@ Before testing, the runner validates that the US regular session contains **exac
 
 There are three expanding-window chronological walk-forward folds. Within each fold, only the **training** segment chooses each strategy's configuration, the best fixed strategy for each time slot, and the dynamic regime-routing thresholds. The immediately following test segment is untouched by that fold's parameter selection. The dynamic router only uses features available **before** the corresponding trading session: overnight's first hour (by 19:00), opening-range width/volume/move (by 09:45), and the morning move/ATR (by 13:00). A fallback **single strategy** and a **fixed three-session schedule** are also compared with the adaptive router; the best *training* policy is then applied to the next test block.
 
+Unlike the first implementation, Deep **streams each candidate's metrics to disk** rather than caching all of its trades in memory, and caches matching entry signals across different risk/target settings. It checks performance in both halves of each training period, requires enough trades in each half, and ranks by **training net P&L penalized for drawdown and losses concentrated in one half**. This makes the choice less dependent on a single exceptional period, although it does not eliminate overfitting. The adaptive-vs-fixed-vs-single portfolio search uses the same training-only robustness score, followed by chronological OOS testing.
+
 The portfolio selects **at most one strategy per time slot**, never overlaps actual position timestamps, limits trading to **three sequential trades per trading date**, and stops placing new entries once prior trades that date have realized **-$1,000 or worse**. It does **not** cap the loss on a gap-through stop; that risk is reported by the simulated fill. ES contract rollovers are never stitched within a single trade. The model intentionally uses minute bars (not quote/tick data), and all results remain research estimates.
 
 **Research caveat:** We have already examined this historical period while developing ORB. Walk-forward testing reduces within-fold hindsight, but this historical dataset is not wholly unexamined; comparing many new ideas on it can still overfit. Never confuse the in-sample best-configuration reports with future returns.
@@ -49,10 +53,10 @@ Pressing Play in default `Multi` mode writes the following reports into `data/`:
 - `multi_strategy_summary.txt` — training-selected portfolio out-of-sample P&L, per-fold results and each strategy's best full-history configuration, profitability, win rate and drawdown.
 - `multi_strategy_full_sample_winners.csv` — highest-**net-profit** **in-sample** candidate for each of the seven strategies and the exact settings, net profit, win rate, drawdown, average trade and profit factor.
 - `multi_strategy_full_sample_highest_win_rate.csv` — highest-**win-rate** candidate in each strategy family, using the same minimum trade-count requirement and reporting its **net profit**, costs, drawdown and settings; this is also **in-sample**.
-- `multi_strategy_individual_walkforward.csv` — the **out-of-sample** result of each strategy's training-selected configuration on the next block.
-- `multi_strategy_portfolio_walkforward.csv` — compare **single-strategy**, **fixed multi-session**, and **adaptive-regime** policies with per-fold training and out-of-sample results.
+- `multi_strategy_individual_walkforward.csv` — the **out-of-sample** result of each strategy's robust training-selected configuration on the next block, with results under **$10, $20 and $30 per-trade costs**.
+- `multi_strategy_portfolio_walkforward.csv` — compare **single-strategy**, **fixed multi-session**, and **adaptive-regime** policies with per-fold training and out-of-sample results, training robustness score and higher-cost sensitivity.
 - `multi_strategy_portfolio_trades.csv` and `multi_strategy_portfolio_monthly.csv` — selected portfolio trades, chronological P&L and monthly summaries.
-- `multi_strategy_candidate_scores.csv` — every tested candidate's training-fold and full-sample metrics.
+- `multi_strategy_candidate_scores.csv` — every one of the 60,160 tested candidates with training fold and full-sample metrics, first/second-half net P&L, robustness ranking score and trade-count eligibility. This file streams as the grid runs; incomplete runs leave incomplete scores.
 - `multi_strategy_data_quality.csv` — actual RTH and overnight minute counts, missing windows and excluded dates.
 
 To compile and run synthetic checks without SQL: `dotnet run -- --self-test`. GitHub Actions also runs a .NET 10 build and these dependency-free tests on each push. For the full historical analysis, your local SQL connection is still required.
@@ -82,7 +86,8 @@ Alternatively, use **Manage User Secrets** or the environment variable `Connecti
     "TimestampTimeZone": "America/New_York"
   },
   "Backtest": {
-    "Mode": "Multi"
+    "Mode": "Multi",
+    "SearchProfile": "Deep"
   }
 }
 ```

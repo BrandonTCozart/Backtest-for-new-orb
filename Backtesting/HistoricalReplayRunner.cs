@@ -251,6 +251,22 @@ public static class HistoricalReplayRunner
         Report("SelectedPortfolio", allOos);
         Report("FallbackPortfolio", fallback.Trades);
 
+        Console.WriteLine();
+        Console.WriteLine("=== FROZEN REPLAY YEAR-BY-YEAR PROFIT ===");
+        Console.WriteLine("YEARLY_REPLAY,year,strategy,net_usd,trades,win_rate_pct");
+        var yearlySources = individual.ToDictionary(x => x.Key.ToString(),
+            x => (IEnumerable<MultiStrategyTrade>)x.Value);
+        yearlySources["SelectedPortfolio"] = allOos;
+        yearlySources["FallbackPortfolio"] = fallback.Trades;
+        var years = sessions.Select(x => x.Day.Year).Distinct().OrderBy(x => x).ToArray();
+        foreach (var (name, allTrades) in yearlySources)
+            foreach (var year in years)
+            {
+                var score = MultiScore.From(allTrades.Where(x => x.Day.Year == year));
+                Console.WriteLine("YEARLY_REPLAY," + year + "," + name + "," +
+                    F(score.Net) + "," + score.Trades + "," + F(score.WinRate));
+            }
+
         var weekly = MultiStrategyRunner.BuildWeeklyOosRows(individual, allOos,
             sessions[0].Day, sessions[^1].Day);
         Console.WriteLine();

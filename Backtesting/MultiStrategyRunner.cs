@@ -532,22 +532,29 @@ public static class MultiStrategyRunner
             robustness is null ? "" : F(robustness.Value),
             qualifies ? "yes" : "no", v.Parameters);
 
-    private static PortfolioOutcome EvaluatePortfolio(
+    // Ranked candidate lists and routing thresholds are fitted on TRAINING only.
+    // In fallback mode, the first *chronologically available* entry in a slot
+    // wins; when two signals enter together, the training rank breaks the tie.
+    // Waiting until day-end to see that the primary never signalled, then
+    // retroactively taking an earlier fallback, would be lookahead.
+    internal static PortfolioOutcome EvaluatePortfolio(
         MultiPortfolioPolicy policy,
         IReadOnlyDictionary<MultiStrategyKind, Choice> winners,
         IReadOnlyList<MultiSession> sessions, int from, int to)
     {
         var chosenTrades = new List<MultiStrategyTrade>();
-        var bestBySlot = winners.Values
+        var fallbackFills = 0;
+        var rankedBySlot = winners.Values
             .Where(c => c.Score.Net > 0m)
             .GroupBy(c => c.Variant.Slot)
-            .ToDictionary(g => g.Key, g => g.OrderByDescending(c => c.Robustness)
+            .ToDictionary(g => g.Key, g => g
+                .OrderByDescending(c => c.Robustness)
                 .ThenByDescending(c => c.Score.Net)
                 .ThenBy(c => c.Variant.Id)
-                .First().Variant.Kind);
+                .Select(c => c.Variant.Kind).ToArray());
 
-        // In adaptive mode, the best strategy for each slot and regime
-        // is fitted on TRAINING only; no same-day P&L decides the route.
+        // Adaptive primary strategy is chosen from the relevant trend/reversal
+        // training cohort, using only features available at the routing time.
         var bestByRegime = winners.Values
             .Where(c => c.Score.Net > 0m)
             .GroupBy(c => (Slot: c.Variant.Slot,
@@ -558,75 +565,97 @@ public static class MultiStrategyRunner
                 .ThenBy(c => c.Variant.Id)
                 .First().Variant.Kind);
 
-        void ChooseRegime(List<MultiStrategyKind> wanted,
-            MultiStrategySlot slot, bool trend)
-        {
-            if (bestByRegime.TryGetValue((slot, trend), out var selected))
-                wanted.Add(selected);
-        }
-
         for (var i = from; i < to; i++)
         {
             var day = sessions[i];
-            var wanted = new List<MultiStrategyKind>();
+            var preferred = new Dictionary<MultiStrategySlot, MultiStrategyKind>();
+            void ChooseRegime(MultiStrategySlot slot, bool trend)
+            {
+                if (bestByRegime.TryGetValue((slot, trend), out var selected))
+                    preferred[slot] = selected;
+                else if (policy.UseFallbacks &&
+                         rankedBySlot.TryGetValue(slot, out var choices) &&
+                         choices.Length > 0)
+                    preferred[slot] = choices[0];
+            }
+
             switch (policy.Mode)
             {
                 case MultiPortfolioMode.Single:
-                    if (policy.SingleStrategy is { } one) wanted.Add(one);
+                    if (policy.SingleStrategy is { } kind &&
+                        winners.TryGetValue(kind, out var single) &&
+                        single.Score.Net > 0m)
+                        preferred[single.Variant.Slot] = kind;
                     break;
                 case MultiPortfolioMode.FixedSessions:
-                    foreach (var slot in new[] { MultiStrategySlot.Overnight,
-                                                 MultiStrategySlot.Morning,
-                                                 MultiStrategySlot.Afternoon })
-                        if (bestBySlot.TryGetValue(slot, out var kind))
-                            wanted.Add(kind);
+                    foreach (var (slot, kinds) in rankedBySlot)
+                        preferred[slot] = kinds[0];
                     break;
                 case MultiPortfolioMode.AdaptiveRegimes:
                     if (day.Overnight is not null && day.FirstHourOvernightAtr > 0m)
-                        ChooseRegime(wanted, MultiStrategySlot.Overnight,
+                        ChooseRegime(MultiStrategySlot.Overnight,
                             Math.Abs(day.FirstHourOvernightMove) >=
                             policy.NightThreshold * day.FirstHourOvernightAtr);
 
                     if (day.EarlyAtr > 0m)
                     {
-                        var trending = day.OpeningWidth >=
+                        var trending = (day.OpeningWidth >=
                             policy.OrbThreshold * day.EarlyAtr &&
-                            day.EarlyVolumeRatio >= 0.8m ||
+                            day.EarlyVolumeRatio >= 0.8m) ||
                             Math.Abs(day.OpeningMove) >=
                             policy.MorningThreshold * day.EarlyAtr;
-                        ChooseRegime(wanted, MultiStrategySlot.Morning, trending);
+                        ChooseRegime(MultiStrategySlot.Morning, trending);
                     }
 
                     if (day.AfternoonAtr > 0m)
-                        ChooseRegime(wanted, MultiStrategySlot.Afternoon,
+                        ChooseRegime(MultiStrategySlot.Afternoon,
                             Math.Abs(day.AfternoonMove) >=
                             policy.AfternoonThreshold * day.AfternoonAtr);
                     break;
             }
 
-            // Candidate selection is based on training scores and features
-            // available before the corresponding session starts.
-            var candidates = new List<MultiStrategyTrade>();
-            foreach (var kind in wanted)
-                if (winners.TryGetValue(kind, out var selected) &&
-                    selected.Score.Net > 0m &&
-                    selected.Trades.TryGetValue(day.Day, out var trade))
-                    candidates.Add(trade);
+            var candidates = new List<(MultiStrategyTrade Trade, bool Fallback)>();
+            foreach (var (slot, primary) in preferred)
+            {
+                // Single-policy evaluation never uses other strategies.
+                // A non-fallback policy evaluates only the primary.
+                var ranked = new List<MultiStrategyKind> { primary };
+                if (policy.UseFallbacks &&
+                    policy.Mode != MultiPortfolioMode.Single &&
+                    rankedBySlot.TryGetValue(slot, out var options))
+                    ranked.AddRange(options.Where(kind => kind != primary));
+
+                var available = ranked.Select((kind, priority) =>
+                    (Kind: kind, Priority: priority))
+                    .Where(x => winners.TryGetValue(x.Kind, out var selected) &&
+                        selected.Score.Net > 0m &&
+                        selected.Trades.ContainsKey(day.Day))
+                    .Select(x => (Trade: winners[x.Kind].Trades[day.Day],
+                                  x.Priority))
+                    .OrderBy(x => x.Trade.EntryAt)
+                    .ThenBy(x => x.Priority)
+                    .FirstOrDefault();
+                if (available.Trade is not null)
+                    candidates.Add((available.Trade, available.Priority > 0));
+            }
 
             DateTimeOffset lastExit = DateTimeOffset.MinValue;
             decimal realized = 0m;
             int count = 0;
-            foreach (var trade in candidates.OrderBy(x => x.EntryAt))
+            foreach (var candidate in candidates.OrderBy(x => x.Trade.EntryAt))
             {
                 if (count >= MaxDailyTrades || realized <= -DailyLossStop) break;
+                var trade = candidate.Trade;
                 if (trade.EntryAt < lastExit) continue;
                 chosenTrades.Add(trade);
+                if (candidate.Fallback) fallbackFills++;
                 lastExit = trade.ExitAt;
                 realized += trade.Net;
                 count++;
             }
         }
-        return new PortfolioOutcome(policy, MultiScore.From(chosenTrades), chosenTrades);
+        return new PortfolioOutcome(policy, MultiScore.From(chosenTrades),
+            chosenTrades, fallbackFills);
     }
 
     // Directional breakout/extension/retest families are trend-following;

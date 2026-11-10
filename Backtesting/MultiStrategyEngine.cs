@@ -15,8 +15,10 @@ public static class MultiStrategyEngine
     private readonly record struct SignalKey(
         MultiStrategyKind Kind, int Lookback, decimal Threshold,
         decimal RelativeVolume, int StartShift, decimal RsiExtreme,
-        bool ConfirmTrend);
-    private readonly record struct Signal(int Index, TradeDirection Side, decimal Atr);
+        bool ConfirmTrend, PriceLevelSource LevelSource,
+        decimal FibRatio, int RetestBars);
+    private readonly record struct Signal(
+        int Index, TradeDirection Side, decimal Atr, decimal? TargetPrice = null);
     private static SignalKey? CurrentRecipe;
     private static readonly Dictionary<DateOnly, Signal?> SignalCache = new();
 
@@ -44,7 +46,8 @@ public static class MultiStrategyEngine
             list.Add(new MultiStrategyVariant(++id, MultiStrategyKind.Orb, 0, buffer,
                 0m, 0m, volume, cutoff, trail, rule));
 
-        foreach (var kind in Enum.GetValues<MultiStrategyKind>().Where(k => k != MultiStrategyKind.Orb))
+        foreach (var kind in Enum.GetValues<MultiStrategyKind>().Where(k =>
+            k != MultiStrategyKind.Orb && !PriceActionSignals.IsPriceAction(k)))
         foreach (var lookback in new[] { 10, 20 })
         foreach (var threshold in kind is MultiStrategyKind.MorningMomentum or
                  MultiStrategyKind.AfternoonMomentum or MultiStrategyKind.OvernightMomentum
@@ -62,6 +65,20 @@ public static class MultiStrategyEngine
                     ? 1.25m : 0m,
                 0, 0m, rule));
 
+        // Small smoke grid also covers every new price-action family, so
+        // CI runs their complete entry/exit and walk-forward integration.
+        foreach (var kind in Enum.GetValues<MultiStrategyKind>()
+                     .Where(PriceActionSignals.IsPriceAction))
+        foreach (var lookback in new[] { 30, 60 })
+            list.Add(new MultiStrategyVariant(++id, kind, lookback, 0.5m,
+                1m, 1.5m, 0m, 0, 0m, EconomicEventRule.Off,
+                LevelSource: kind is MultiStrategyKind.MorningFibonacciRetracement or
+                    MultiStrategyKind.AfternoonFibonacciRetracement or
+                    MultiStrategyKind.MorningFibonacciExtension or
+                    MultiStrategyKind.AfternoonFibonacciExtension
+                    ? PriceLevelSource.Rolling : PriceLevelSource.OpeningRange,
+                FibRatio: kind is MultiStrategyKind.MorningFibonacciExtension or
+                    MultiStrategyKind.AfternoonFibonacciExtension ? 1.272m : 0.5m));
         return list;
     }
 
@@ -95,7 +112,8 @@ public static class MultiStrategyEngine
 
         var recipe = new SignalKey(variant.Kind, variant.Lookback,
             variant.Threshold, variant.VolumeMultiple, variant.StartShiftMinutes,
-            variant.RsiExtreme, variant.TrendConfirmation);
+            variant.RsiExtreme, variant.TrendConfirmation,
+            variant.LevelSource, variant.FibRatio, variant.RetestBars);
         if (CurrentRecipe != recipe)
         {
             SignalCache.Clear();
@@ -130,12 +148,15 @@ public static class MultiStrategyEngine
         if (bars is null) return null;
         var (_, _, lastExit) = Window(v);
         return SimulateBracket(v, s, bars, signal.Value.Index + 1, lastExit,
-            signal.Value.Side, signal.Value.Atr);
+            signal.Value.Side, signal.Value.Atr, signal.Value.TargetPrice);
     }
 
     private static (int First, int LastSignal, int LastExit) Window(
         MultiStrategyVariant v)
     {
+        if (PriceActionSignals.IsPriceAction(v.Kind))
+            return PriceActionSignals.Window(v);
+
         var (first, lastSignal, lastExit) = v.Kind switch
         {
             MultiStrategyKind.MorningMomentum => (15, 90, 119),
@@ -151,6 +172,13 @@ public static class MultiStrategyEngine
 
     private static Signal? FindSignal(MultiStrategyVariant v, MultiSession s)
     {
+        if (PriceActionSignals.IsPriceAction(v.Kind))
+        {
+            var setup = PriceActionSignals.Find(v, s);
+            return setup is { } x
+                ? new Signal(x.Index, x.Side, x.Atr, x.TargetPrice) : null;
+        }
+
         var overnight = v.Slot == MultiStrategySlot.Overnight;
         var bars = overnight ? s.Overnight : s.Rth;
         var m = overnight ? s.OvernightIndicators : s.RthIndicators;
@@ -229,7 +257,8 @@ public static class MultiStrategyEngine
 
     private static MultiStrategyTrade? SimulateBracket(
         MultiStrategyVariant v, MultiSession s, PriceBar[] bars, int entryIndex,
-        int lastExit, TradeDirection side, decimal signalAtr)
+        int lastExit, TradeDirection side, decimal signalAtr,
+        decimal? referenceTarget = null)
     {
         if (entryIndex >= lastExit || lastExit >= bars.Length) return null;
         var entryAt = bars[entryIndex].T;
@@ -241,6 +270,17 @@ public static class MultiStrategyEngine
                 signalAtr * v.StopAtrMultiple) / Tick) * Tick;
         if (stopPoints < 0.5m) return null;
         var targetPoints = Math.Floor(stopPoints * v.RewardRisk / Tick) * Tick;
+        if (referenceTarget is decimal reference)
+        {
+            // Fibonacci exits use the actual projected/previous-swing
+            // reference, bounded by the tested reward-risk cap. Tick-round
+            // toward entry to avoid assuming a favorable unattainable fill.
+            var referenceDistance = side == TradeDirection.Long
+                ? reference - entry : entry - reference;
+            if (referenceDistance < Tick) return null;
+            targetPoints = Math.Min(targetPoints,
+                Math.Floor(referenceDistance / Tick) * Tick);
+        }
         if (targetPoints < Tick) return null;
         var stop = side == TradeDirection.Long ? entry - stopPoints : entry + stopPoints;
         var target = side == TradeDirection.Long ? entry + targetPoints : entry - targetPoints;

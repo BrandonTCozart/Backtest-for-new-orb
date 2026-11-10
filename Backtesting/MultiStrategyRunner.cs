@@ -404,7 +404,7 @@ public static class MultiStrategyRunner
     // the first 40% of the dates. Every subsequent day appears in exactly one
     // test block, and no fold's own test dates enter its training selection.
     // A small 25-session synthetic test retains the legacy three folds.
-    private static WalkForwardFold[] CreateResearchFolds(int totalSessions)
+    internal static WalkForwardFold[] CreateResearchFolds(int totalSessions)
     {
         if (totalSessions < 60)
             return WalkForwardFold.Create(totalSessions);

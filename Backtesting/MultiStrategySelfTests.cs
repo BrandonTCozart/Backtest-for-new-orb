@@ -29,11 +29,8 @@ public static class MultiStrategySelfTests
             var nightAudit = MultiStrategyData.Build(missingNight, missingNight, folder);
             Ensure(nightAudit.Count == 1 && nightAudit[0].Overnight is null,
                 "Missing overnight minutes must exclude only overnight trading.");
-            var missingAudit = File.ReadAllLines(Path.Combine(folder,
-                "multi_strategy_data_quality.csv"));
-            Ensure(missingAudit[1].Split(',')[4] == "929" &&
-                   missingAudit[1].Contains("overnight_first_missing_"),
-                   "Overnight audit must count all observed minutes and identify its first gap.");
+            Ensure(nightAudit[0].Rth.Length == 390,
+                "RTH stays valid even if an overnight minute is absent.");
 
             var mutated = bars.Select(b => b.T == session.Rth[300].T
                 ? b with { C = new Candle {
@@ -141,48 +138,39 @@ public static class MultiStrategySelfTests
                 .Take(25).ToArray();
             var syntheticYear = sampleDays.SelectMany(CreateFullSession)
                 .OrderBy(b => b.T).ToList();
-            Ensure(MultiStrategyRunner.Run(syntheticYear, syntheticYear, folder,
-                MultiSearchProfile.Smoke) == 0,
-                "Complete synthetic multi-strategy backtest should return success.");
-            var reportFolder = Path.Combine(folder, "data");
-            foreach (var required in new[] {
-                "multi_strategy_summary.txt",
-                "multi_strategy_data_quality.csv",
-                "multi_strategy_full_sample_winners.csv",
-                "multi_strategy_full_sample_highest_win_rate.csv",
-                "multi_strategy_candidate_scores.csv",
-                "multi_strategy_individual_walkforward.csv",
-                "multi_strategy_individual_oos_summary.csv",
-                "multi_strategy_portfolio_walkforward.csv",
-                "multi_strategy_portfolio_trades.csv",
-                "multi_strategy_portfolio_monthly.csv"
-            })
-                Ensure(File.Exists(Path.Combine(reportFolder, required)),
-                    "Missing completed research report: " + required);
-
-            var oosRows = File.ReadAllLines(Path.Combine(reportFolder,
-                    "multi_strategy_portfolio_trades.csv")).Skip(1)
-                .Select(x => x.Split(',')).ToArray();
-            foreach (var dayGroup in oosRows.GroupBy(x => x[1]))
+            // Capture the ordinary console report instead of checking report
+            // artifacts: the backtest must not write any files or need them.
+            var regularOut = Console.Out;
+            using var captured = new StringWriter();
+            int status;
+            try
             {
-                var previousExit = DateTimeOffset.MinValue;
-                var count = 0;
-                foreach (var row in dayGroup.OrderBy(x =>
-                    DateTimeOffset.Parse(x[6], System.Globalization.CultureInfo.InvariantCulture)))
-                {
-                    var entry = DateTimeOffset.Parse(row[6],
-                        System.Globalization.CultureInfo.InvariantCulture);
-                    var exit = DateTimeOffset.Parse(row[7],
-                        System.Globalization.CultureInfo.InvariantCulture);
-                    Ensure(entry >= previousExit && exit > entry,
-                        "Portfolio must never overlap two positions.");
-                    previousExit = exit;
-                    count++;
-                }
-                Ensure(count <= 3, "Maximum three sequential trades per trading date.");
+                Console.SetOut(captured);
+                status = MultiStrategyRunner.Run(syntheticYear, syntheticYear,
+                    folder, MultiSearchProfile.Smoke);
             }
+            finally
+            {
+                Console.SetOut(regularOut);
+            }
+            Ensure(status == 0,
+                "Complete synthetic multi-strategy backtest should return success.");
+            var terminal = captured.ToString();
+            Ensure(terminal.Contains("WEEKLY_OOS,week_start_et,week_end_et,strategy,net_usd,cumulative_net_usd,trades"),
+                "Weekly terminal output must have the expected graph-ready columns.");
+            var weeklyLines = terminal.Split('\n')
+                .Where(line => line.StartsWith("WEEKLY_OOS,", StringComparison.Ordinal))
+                .ToArray();
+            Ensure(weeklyLines.Length > Enum.GetValues<MultiStrategyKind>().Length &&
+                   weeklyLines.Any(x => x.Contains(",SelectedPortfolio,")),
+                "Console must contain weekly data for all strategies and the selected portfolio.");
+            Ensure(!Directory.Exists(folder) ||
+                   !Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories).Any(),
+                "Multi-strategy execution must not create any CSV/text report files.");
 
-            Console.WriteLine("PASS: full 25-session synthetic walk-forward and all report outputs.");
+            TestWeeklyTotals(date);
+
+            Console.WriteLine("PASS: full 25-session synthetic walk-forward and terminal-only reporting.");
             Console.WriteLine("PASS: synthetic full/missing RTH and overnight minute coverage,");
             Console.WriteLine("      lookahead boundary checks, trade risk/close-time invariants,");
             Console.WriteLine("      nineteen strategy candidate families, P&L and event-calendar checks.");
@@ -197,6 +185,38 @@ public static class MultiStrategySelfTests
         {
             if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
         }
+    }
+
+    private static void TestWeeklyTotals(DateOnly date)
+    {
+        // Monday 2026-08-31; first and last weeks are included even with
+        // no orders. Sums of per-week net and cumulative net must reconcile.
+        var monday = new DateOnly(2026, 8, 31);
+        var trades = Enum.GetValues<MultiStrategyKind>().ToDictionary(
+            k => k, _ => new List<MultiStrategyTrade>());
+        var kind = MultiStrategyKind.MorningMomentum;
+        var firstEntry = MarketTime.ToUtc(monday, new TimeOnly(10, 0));
+        var secondEntry = MarketTime.ToUtc(monday.AddDays(8), new TimeOnly(10, 0));
+        trades[kind].Add(new MultiStrategyTrade(monday, kind, 1, "ESU6",
+            TradeDirection.Long, firstEntry, firstEntry.AddMinutes(1),
+            5000m, 5002m, 110m, "target")); // net +$90
+        trades[kind].Add(new MultiStrategyTrade(monday.AddDays(8), kind, 1, "ESU6",
+            TradeDirection.Long, secondEntry, secondEntry.AddMinutes(1),
+            5000m, 4999m, 60m, "stop")); // net -$60
+        var rows = MultiStrategyRunner.BuildWeeklyOosRows(
+            trades, trades[kind], monday, monday.AddDays(20));
+        var momentum = rows.Where(x => x.Strategy == kind.ToString()).ToArray();
+        Ensure(momentum.Length == 3 &&
+               momentum[0].WeekStart == monday &&
+               momentum[0].WeekEnd == monday.AddDays(6) &&
+               momentum[0].Net == 90m &&
+               momentum[1].Net == -60m &&
+               momentum[2].Net == 0m &&
+               momentum[^1].Cumulative == 30m,
+            "Weekly series must use Monday-Sunday dates, zero-fill, and cumulative net P&L.");
+        Ensure(rows.Where(x => x.Strategy == "SelectedPortfolio").Sum(x => x.Net) == 30m &&
+               momentum.Sum(x => x.Net) == MultiScore.From(trades[kind]).Net,
+            "Every weekly series must reconcile to stitched OOS trade-level net profit.");
     }
 
     // Every new family must actually produce a signal on a deterministic

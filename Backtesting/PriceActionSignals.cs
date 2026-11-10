@@ -14,12 +14,29 @@ public static class PriceActionSignals
         decimal? TargetPrice = null);
 
     public static bool IsPriceAction(MultiStrategyKind kind) => kind is
-        MultiStrategyKind.SupportResistanceBounce or
-        MultiStrategyKind.SupportResistanceBreakout or
-        MultiStrategyKind.BreakoutRetest or
-        MultiStrategyKind.FibonacciRetracement or
-        MultiStrategyKind.FibonacciExtension or
-        MultiStrategyKind.LiquiditySweep;
+        MultiStrategyKind.MorningSupportResistanceBounce or
+        MultiStrategyKind.AfternoonSupportResistanceBounce or
+        MultiStrategyKind.MorningSupportResistanceBreakout or
+        MultiStrategyKind.AfternoonSupportResistanceBreakout or
+        MultiStrategyKind.MorningBreakoutRetest or
+        MultiStrategyKind.AfternoonBreakoutRetest or
+        MultiStrategyKind.MorningFibonacciRetracement or
+        MultiStrategyKind.AfternoonFibonacciRetracement or
+        MultiStrategyKind.MorningFibonacciExtension or
+        MultiStrategyKind.AfternoonFibonacciExtension or
+        MultiStrategyKind.MorningLiquiditySweep or
+        MultiStrategyKind.AfternoonLiquiditySweep;
+
+    private static MultiStrategyKind Family(MultiStrategyKind kind) => kind switch
+    {
+        MultiStrategyKind.AfternoonSupportResistanceBounce => MultiStrategyKind.MorningSupportResistanceBounce,
+        MultiStrategyKind.AfternoonSupportResistanceBreakout => MultiStrategyKind.MorningSupportResistanceBreakout,
+        MultiStrategyKind.AfternoonBreakoutRetest => MultiStrategyKind.MorningBreakoutRetest,
+        MultiStrategyKind.AfternoonFibonacciRetracement => MultiStrategyKind.MorningFibonacciRetracement,
+        MultiStrategyKind.AfternoonFibonacciExtension => MultiStrategyKind.MorningFibonacciExtension,
+        MultiStrategyKind.AfternoonLiquiditySweep => MultiStrategyKind.MorningLiquiditySweep,
+        _ => kind
+    };
 
     public static (int First, int LastSignal, int LastExit) Window(MultiStrategyVariant v) =>
         v.Slot == MultiStrategySlot.Afternoon
@@ -31,6 +48,7 @@ public static class PriceActionSignals
         if (!IsPriceAction(v.Kind) || v.Slot == MultiStrategySlot.Overnight)
             return null;
 
+        var family = Family(v.Kind);
         var bars = s.Rth;
         var indicators = s.RthIndicators;
         var (first, end, _) = Window(v);
@@ -45,8 +63,8 @@ public static class PriceActionSignals
             TradeDirection? side = null;
             decimal? target = null;
 
-            if (v.Kind is MultiStrategyKind.FibonacciRetracement or
-                          MultiStrategyKind.FibonacciExtension)
+            if (family is MultiStrategyKind.MorningFibonacciRetracement or
+                          MultiStrategyKind.MorningFibonacciExtension)
             {
                 // The lookback ends at i-1. Neither the signal candle's
                 // extremes nor any future pivot determines Fibonacci anchors.
@@ -54,11 +72,11 @@ public static class PriceActionSignals
                 var swing = FindCompletedSwing(bars, i, v.Lookback);
                 if (swing is null || swing.Value.Size < atr * 2m)
                     continue;
-                var (low, high, lowAt, highAt) = swing.Value;
+                var (low, high, lowAt, highAt, _) = swing.Value;
                 if (highAt > lowAt + 1)
                 {
                     // Upward impulse from a prior low to a later prior high.
-                    if (v.Kind == MultiStrategyKind.FibonacciRetracement)
+                    if (family == MultiStrategyKind.MorningFibonacciRetracement)
                     {
                         var level = high - (high - low) * v.FibRatio;
                         if (current.L <= level + v.Threshold &&
@@ -84,7 +102,7 @@ public static class PriceActionSignals
                 else if (lowAt > highAt + 1)
                 {
                     // Downward impulse from an earlier high to a later low.
-                    if (v.Kind == MultiStrategyKind.FibonacciRetracement)
+                    if (family == MultiStrategyKind.MorningFibonacciRetracement)
                     {
                         var level = low + (high - low) * v.FibRatio;
                         if (current.H >= level - v.Threshold &&
@@ -108,7 +126,7 @@ public static class PriceActionSignals
                     }
                 }
             }
-            else if (v.Kind == MultiStrategyKind.BreakoutRetest)
+            else if (family == MultiStrategyKind.MorningBreakoutRetest)
             {
                 side = FindRetest(v, s, i);
             }
@@ -118,9 +136,9 @@ public static class PriceActionSignals
                 if (levels is null) continue;
                 var (support, resistance) = levels.Value;
                 var buffer = v.Threshold;
-                switch (v.Kind)
+                switch (family)
                 {
-                    case MultiStrategyKind.SupportResistanceBounce:
+                    case MultiStrategyKind.MorningSupportResistanceBounce:
                         if (current.L <= support + buffer &&
                             current.L >= support - buffer &&
                             current.C > support + buffer &&
@@ -133,7 +151,7 @@ public static class PriceActionSignals
                             side = TradeDirection.Short;
                         break;
 
-                    case MultiStrategyKind.SupportResistanceBreakout:
+                    case MultiStrategyKind.MorningSupportResistanceBreakout:
                         if (previous.C <= resistance &&
                             current.C > resistance + buffer &&
                             current.C > current.O)
@@ -144,7 +162,7 @@ public static class PriceActionSignals
                             side = TradeDirection.Short;
                         break;
 
-                    case MultiStrategyKind.LiquiditySweep:
+                    case MultiStrategyKind.MorningLiquiditySweep:
                         if (previous.C >= support &&
                             current.L < support - buffer &&
                             current.C >= support + 0.25m &&

@@ -55,6 +55,17 @@ public static class MultiStrategySelfTests
             Ensure(variants.Count == variants.Select(x => x.Id).Distinct().Count() &&
                    variants.Count == 416,
                 "Smoke grid must contain 416 unique variants.");
+            var deepFolds = MultiStrategyRunner.CreateResearchFolds(249);
+            Ensure(deepFolds.Length == 5 &&
+                   deepFolds[0].TrainingEnd == 99 &&
+                   deepFolds[0].TestStart == 99 &&
+                   deepFolds[^1].TestEnd == 249 &&
+                   deepFolds.All(f => f.TrainingEnd == f.TestStart),
+                "Deep walk-forward must have five chronological expanding training/test blocks.");
+            for (var i = 1; i < deepFolds.Length; i++)
+                Ensure(deepFolds[i].TestStart == deepFolds[i - 1].TestEnd &&
+                       deepFolds[i].TrainingEnd > deepFolds[i - 1].TrainingEnd,
+                    "Five forward test blocks must be contiguous, nonoverlapping and chronological.");
             var deepVariants = MultiStrategyEngine.EnumerateVariants(MultiSearchProfile.Deep);
             Ensure(deepVariants.Count == deepVariants.Select(x => x.Id).Distinct().Count() &&
                    deepVariants.Count == 60160,

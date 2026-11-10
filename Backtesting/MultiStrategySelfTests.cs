@@ -109,6 +109,7 @@ public static class MultiStrategySelfTests
             }
 
             TestPriceActionSignals(date, folder);
+            TestFallbackRouting(date, session, variants);
 
             var start = MarketTime.ToUtc(date, new TimeOnly(11, 0));
             var win = new MultiStrategyTrade(date, MultiStrategyKind.MorningMomentum, 1,
@@ -167,6 +168,26 @@ public static class MultiStrategySelfTests
             Ensure(!Directory.Exists(folder) ||
                    !Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories).Any(),
                 "Multi-strategy execution must not create any CSV/text report files.");
+            var totalLines = terminal.Split('\n')
+                .Where(line => line.StartsWith("TOTAL_PNL,", StringComparison.Ordinal))
+                .ToArray();
+            Ensure(totalLines.Length == Enum.GetValues<MultiStrategyKind>().Length + 2 &&
+                   totalLines.Any(x => x.StartsWith("TOTAL_PNL,SelectedPortfolio,")),
+                "All strategy and portfolio in-sample-plus-OOS totals must be printed.");
+            foreach (var line in totalLines.Skip(1))
+            {
+                var cells = line.Trim().Split(',');
+                Ensure(cells.Length == 8,
+                    "Each total P&L line must have eight graph/analysis-ready columns.");
+                var training = decimal.Parse(cells[2],
+                    System.Globalization.CultureInfo.InvariantCulture);
+                var outOfSample = decimal.Parse(cells[3],
+                    System.Globalization.CultureInfo.InvariantCulture);
+                var full = decimal.Parse(cells[4],
+                    System.Globalization.CultureInfo.InvariantCulture);
+                Ensure(full == training + outOfSample,
+                    "Full-history net P&L must exactly equal disjoint in-sample prefix plus OOS.");
+            }
 
             TestWeeklyTotals(date);
 
@@ -185,6 +206,93 @@ public static class MultiStrategySelfTests
         {
             if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
         }
+    }
+
+    private static void TestFallbackRouting(
+        DateOnly day, MultiSession session,
+        IReadOnlyList<MultiStrategyVariant> variants)
+    {
+        var primary = variants.First(v => v.Kind == MultiStrategyKind.MorningMomentum);
+        var alternate = variants.First(v => v.Kind == MultiStrategyKind.MorningLiquiditySweep);
+        var begin = MarketTime.ToUtc(day, new TimeOnly(10, 0));
+        MultiStrategyTrade Trade(MultiStrategyVariant v, int entryMinutes) =>
+            new(day, v.Kind, v.Id, session.Contract, TradeDirection.Long,
+                begin.AddMinutes(entryMinutes),
+                begin.AddMinutes(entryMinutes + 3),
+                5000m, 5002m, 100m, "target");
+        var laterPrimary = Trade(primary, 30);
+        var earlyAlternate = Trade(alternate, 5);
+        MultiStrategyRunner.Choice BuildChoice(
+            MultiStrategyVariant v, MultiStrategyTrade reportTrade,
+            IReadOnlyDictionary<DateOnly, MultiStrategyTrade> available,
+            decimal robustness)
+        {
+            var score = MultiScore.From(new[] { reportTrade });
+            return new MultiStrategyRunner.Choice(v, score, available,
+                robustness, score, score);
+        }
+        var noPrimary = new Dictionary<MultiStrategyKind, MultiStrategyRunner.Choice>
+        {
+            [primary.Kind] = BuildChoice(primary, laterPrimary,
+                new Dictionary<DateOnly, MultiStrategyTrade>(), 200m),
+            [alternate.Kind] = BuildChoice(alternate, earlyAlternate,
+                new Dictionary<DateOnly, MultiStrategyTrade> {
+                    [day] = earlyAlternate
+                }, 100m)
+        };
+        var fixedBase = new MultiPortfolioPolicy(MultiPortfolioMode.FixedSessions);
+        var fixedFallback = fixedBase with { UseFallbacks = true };
+        var firstBase = MultiStrategyRunner.EvaluatePortfolio(fixedBase,
+            noPrimary, new[] { session }, 0, 1);
+        var firstFallback = MultiStrategyRunner.EvaluatePortfolio(fixedFallback,
+            noPrimary, new[] { session }, 0, 1);
+        Ensure(firstBase.Score.Trades == 0 &&
+               firstFallback.Score.Trades == 1 &&
+               firstFallback.Trades[0].Kind == alternate.Kind &&
+               firstFallback.FallbackTrades == 1,
+            "Fallback must fill a valid alternate signal when the primary has none.");
+
+        var withPrimary = new Dictionary<MultiStrategyKind, MultiStrategyRunner.Choice>(
+            noPrimary)
+        {
+            [primary.Kind] = BuildChoice(primary, laterPrimary,
+                new Dictionary<DateOnly, MultiStrategyTrade> { [day] = laterPrimary },
+                200m)
+        };
+        var timeFirst = MultiStrategyRunner.EvaluatePortfolio(fixedFallback,
+            withPrimary, new[] { session }, 0, 1);
+        var original = MultiStrategyRunner.EvaluatePortfolio(fixedBase,
+            withPrimary, new[] { session }, 0, 1);
+        Ensure(timeFirst.Score.Trades == 1 &&
+               timeFirst.Trades[0].Kind == alternate.Kind &&
+               timeFirst.FallbackTrades == 1 &&
+               original.Trades.Single().Kind == primary.Kind,
+            "Chronological fallback may enter only when its signal occurs first; no hindsight.");
+
+        var tiePrimary = Trade(primary, 5);
+        withPrimary[primary.Kind] = BuildChoice(primary, tiePrimary,
+            new Dictionary<DateOnly, MultiStrategyTrade> { [day] = tiePrimary },
+            200m);
+        var tie = MultiStrategyRunner.EvaluatePortfolio(fixedFallback,
+            withPrimary, new[] { session }, 0, 1);
+        Ensure(tie.Score.Trades == 1 &&
+               tie.Trades[0].Kind == primary.Kind && tie.FallbackTrades == 0,
+            "When two strategies signal simultaneously, training-ranked primary wins.");
+
+        var single = MultiStrategyRunner.EvaluatePortfolio(
+            new MultiPortfolioPolicy(MultiPortfolioMode.Single, primary.Kind,
+                UseFallbacks: true), noPrimary, new[] { session }, 0, 1);
+        Ensure(single.Score.Trades == 0 && single.FallbackTrades == 0,
+            "Standalone single-strategy policies must remain single-strategy.");
+
+        var adaptive = MultiStrategyRunner.EvaluatePortfolio(
+            new MultiPortfolioPolicy(MultiPortfolioMode.AdaptiveRegimes,
+                OrbThreshold: -1m, MorningThreshold: -1m, UseFallbacks: true),
+            noPrimary, new[] { session }, 0, 1);
+        Ensure(session.EarlyAtr > 0m && adaptive.Score.Trades == 1 &&
+               adaptive.Trades[0].Kind == alternate.Kind &&
+               adaptive.FallbackTrades == 1,
+            "Adaptive trend-regime strategy must be able to fall back to another morning family.");
     }
 
     private static void TestWeeklyTotals(DateOnly date)

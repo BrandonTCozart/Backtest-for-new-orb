@@ -1,4 +1,3 @@
-using System.Globalization;
 using Orb;
 
 namespace Backtest_for_new_orb;
@@ -179,7 +178,8 @@ public static class MultiStrategyData
         IReadOnlyList<PriceBar> activeBars,
         IReadOnlyList<PriceBar> allContractBars, string reportDirectory)
     {
-        Directory.CreateDirectory(reportDirectory);
+        // reportDirectory retained for compatibility with existing callers;
+        // multi-strategy auditing now reports counts on stdout only.
         // Preserve real contract identity: never bridge a futures rollover
         // with price bars belonging to another ES contract.
         var contracts = new Dictionary<string, Dictionary<DateTimeOffset, PriceBar>>(
@@ -196,9 +196,6 @@ public static class MultiStrategyData
                 duplicateTimes.Add((bar.Contract.ToUpperInvariant(), bar.T));
         }
 
-        var rows = new List<string> {
-            "trading_date_et,es_contract,rth_minutes,rth_valid,overnight_minutes,overnight_valid,reason"
-        };
         var valid = new List<MultiSession>();
         var excluded = 0;
         var missingOvernight = 0;
@@ -224,7 +221,6 @@ public static class MultiStrategyData
             if (!rthOk)
             {
                 excluded++;
-                rows.Add($"{day:yyyy-MM-dd},{contract},{rth.Length},no,0,no,incomplete_or_mixed_RTH");
                 continue;
             }
 
@@ -291,19 +287,12 @@ public static class MultiStrategyData
                     nightBars[59].C.C - nightBars[0].C.O,
                 FirstHourOvernightAtr = nightMetrics is null ? 0m : nightMetrics.Atr14[59]
             });
-            var nightReason = overnightOk ? "ok" :
-                "overnight_first_missing_" +
-                (firstOvernightGap?.ToString("yyyyMMddTHHmmss", CultureInfo.InvariantCulture)
-                    ?? "invalid_duration");
-            rows.Add($"{day:yyyy-MM-dd},{contract},{rth.Length},yes,{observedOvernightMinutes}," +
-                     $"{(overnightOk ? "yes" : "no")},{nightReason}");
         }
 
-        File.WriteAllLines(Path.Combine(reportDirectory, "multi_strategy_data_quality.csv"), rows);
         Console.WriteLine($"Multi-strategy data audit: {valid.Count:N0} complete 390-minute RTH sessions; " +
                           $"{excluded:N0} incomplete RTH sessions excluded; " +
                           $"{valid.Count - missingOvernight:N0} complete 930-minute overnight sessions.");
-        Console.WriteLine("Audit: data/multi_strategy_data_quality.csv (missing overnight excludes only overnight trades).");
+        Console.WriteLine("Incomplete overnight windows exclude only overnight strategy entries.");
         return valid;
     }
 

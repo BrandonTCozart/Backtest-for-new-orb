@@ -51,10 +51,17 @@ public static class MultiStrategySelfTests
                    session.AfternoonAtr == future.AfternoonAtr,
                    "13:00 routing features must not depend on post-13:00 candles.");
 
-            var variants = MultiStrategyEngine.EnumerateVariants();
+            var variants = MultiStrategyEngine.EnumerateVariants(MultiSearchProfile.Smoke);
             Ensure(variants.Count == variants.Select(x => x.Id).Distinct().Count() &&
                    variants.Count == 416,
-                "Candidate grid must contain all 416 unique, reviewed variants.");
+                "Smoke grid must contain 416 unique variants.");
+            var deepVariants = MultiStrategyEngine.EnumerateVariants(MultiSearchProfile.Deep);
+            Ensure(deepVariants.Count == deepVariants.Select(x => x.Id).Distinct().Count() &&
+                   deepVariants.Count == 40448,
+                "Deep grid must contain 40,448 unique reviewed configurations.");
+            Ensure(Enum.GetValues<MultiStrategyKind>().All(k =>
+                deepVariants.Any(v => v.Kind == k)),
+                "Deep grid must cover all seven strategy families.");
             Ensure(Enum.GetValues<MultiStrategyKind>().All(
                 k => variants.Any(v => v.Kind == k)),
                 "Every intended strategy must have candidate configurations.");
@@ -120,7 +127,8 @@ public static class MultiStrategySelfTests
                 .Take(25).ToArray();
             var syntheticYear = sampleDays.SelectMany(CreateFullSession)
                 .OrderBy(b => b.T).ToList();
-            Ensure(MultiStrategyRunner.Run(syntheticYear, syntheticYear, folder) == 0,
+            Ensure(MultiStrategyRunner.Run(syntheticYear, syntheticYear, folder,
+                MultiSearchProfile.Smoke) == 0,
                 "Complete synthetic multi-strategy backtest should return success.");
             var reportFolder = Path.Combine(folder, "data");
             foreach (var required in new[] {

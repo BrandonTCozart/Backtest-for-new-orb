@@ -314,6 +314,7 @@ public static class MultiStrategyRunner
         }
 
         var oosSorted = chosenOos.OrderBy(x => x.Trade.EntryAt).ToArray();
+        ValidatePortfolioOos(oosSorted.Select(x => x.Trade));
         var oosScore = MultiScore.From(oosSorted.Select(x => x.Trade));
         summary.Add("");
         summary.Add("STITCHED WALK-FORWARD OOS NET: $" + F(oosScore.Net) +
@@ -369,6 +370,28 @@ public static class MultiStrategyRunner
                     ", settings: " + selected.Variant.Parameters);
         Console.WriteLine("Console-only reporting: no CSV or text reports created; existing files are untouched.");
         return 0;
+    }
+
+    // Validate portfolio invariants directly on the stitched OOS trades.
+    // Previously these checks relied on rereading a generated trades CSV.
+    private static void ValidatePortfolioOos(IEnumerable<MultiStrategyTrade> trades)
+    {
+        foreach (var group in trades.GroupBy(t => t.Day))
+        {
+            DateTimeOffset lastExit = DateTimeOffset.MinValue;
+            int count = 0;
+            foreach (var trade in group.OrderBy(t => t.EntryAt))
+            {
+                if (trade.ExitAt <= trade.EntryAt || trade.EntryAt < lastExit)
+                    throw new InvalidOperationException(
+                        "Overlapping or invalid OOS portfolio positions on " + group.Key);
+                lastExit = trade.ExitAt;
+                count++;
+            }
+            if (count > MaxDailyTrades)
+                throw new InvalidOperationException(
+                    "Too many OOS portfolio positions on " + group.Key);
+        }
     }
 
     internal sealed record WeeklyOosRow(

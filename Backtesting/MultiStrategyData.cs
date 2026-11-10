@@ -18,11 +18,25 @@ public enum MultiStrategyKind
 
 public enum MultiStrategySlot { Overnight, Morning, Afternoon }
 
+// Deep is the regular SQL research grid. Smoke is kept small for CI regression
+// tests and short iterations; it must never silently be reported as Deep.
+public enum MultiSearchProfile { Smoke, Deep }
+
 public sealed record MultiStrategyVariant(
     int Id, MultiStrategyKind Kind, int Lookback, decimal Threshold,
     decimal StopAtrMultiple, decimal RewardRisk, decimal VolumeMultiple,
     int OrbCutoffMinutes, decimal OrbTrailDollars,
-    EconomicEventRule EventRule)
+    EconomicEventRule EventRule,
+    int WeekdayMask = WeekdaySelection.All,
+    int StartShiftMinutes = 0,
+    decimal RsiExtreme = 65m,
+    bool TrendConfirmation = true,
+    VwapRule OrbVwap = VwapRule.Off,
+    decimal OrbRangeMin = 0m,
+    decimal OrbRangeMax = 10000m,
+    bool OrbRetest = false,
+    decimal OrbRiskCap = 600m,
+    decimal OrbFallbackRisk = 500m)
 {
     public MultiStrategySlot Slot => Kind switch
     {
@@ -31,11 +45,19 @@ public sealed record MultiStrategyVariant(
         _ => MultiStrategySlot.Morning
     };
 
+    // This is a single CSV field: semicolons separate disclosed settings.
     public string Parameters => string.Join("; ",
         $"kind={Kind}", $"lookback={Lookback}", $"signal_threshold={Threshold}",
         $"stop_ATR_multiple={StopAtrMultiple}", $"reward_risk={RewardRisk}",
         $"relative_volume={VolumeMultiple}", $"ORB_cutoff_minutes={OrbCutoffMinutes}",
-        $"ORB_stage5_trail_dollars={OrbTrailDollars}", $"economic_event_rule={EventRule}");
+        $"ORB_stage5_trail_dollars={OrbTrailDollars}",
+        $"economic_event_rule={EventRule}",
+        $"weekdays={WeekdaySelection.Format(WeekdayMask)}",
+        $"start_shift_minutes={StartShiftMinutes}",
+        $"RSI_extreme={RsiExtreme}", $"trend_confirmation={TrendConfirmation}",
+        $"ORB_vwap={OrbVwap}", $"ORB_range={OrbRangeMin}-{OrbRangeMax}",
+        $"ORB_retest={OrbRetest}", $"ORB_initial_risk_cap={OrbRiskCap}",
+        $"ORB_fallback_risk={OrbFallbackRisk}");
 }
 
 public sealed class MultiIndicators

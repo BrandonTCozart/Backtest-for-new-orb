@@ -9,8 +9,29 @@ public static class MultiStrategyEngine
     private const decimal Tick = 0.25m;
     private const decimal MaxInitialRiskDollars = 600m;
 
-    public static IReadOnlyList<MultiStrategyVariant> EnumerateVariants()
+    // Deep variants are intentionally ordered by entry recipe. Only the
+    // previous recipe's ~250 day signals are cached: bounded memory even
+    // with tens of thousands of stop/target/event variations.
+    private readonly record struct SignalKey(
+        MultiStrategyKind Kind, int Lookback, decimal Threshold,
+        decimal RelativeVolume, int StartShift, decimal RsiExtreme,
+        bool ConfirmTrend);
+    private readonly record struct Signal(int Index, TradeDirection Side, decimal Atr);
+    private static SignalKey? CurrentRecipe;
+    private static readonly Dictionary<DateOnly, Signal?> SignalCache = new();
+
+    public static void ClearCaches()
     {
+        CurrentRecipe = null;
+        SignalCache.Clear();
+    }
+
+    public static IReadOnlyList<MultiStrategyVariant> EnumerateVariants(
+        MultiSearchProfile profile = MultiSearchProfile.Deep)
+    {
+        if (profile == MultiSearchProfile.Deep)
+            return MultiStrategyGrid.Deep();
+
         var list = new List<MultiStrategyVariant>();
         var id = 0;
         // ORB is still the original strategy implementation, NOT a re-creation
@@ -54,10 +75,11 @@ public static class MultiStrategyEngine
             // Existing OrbStage stop engine and FVG rules, same as prior optimizer.
             var orbConfig = new OptimizationConfig(
                 variant.Id, TimeSpan.FromMinutes(9 * 60 + 30 + variant.OrbCutoffMinutes),
-                new RangeBand(0m, 10000m), VwapRule.Off,
-                variant.Threshold, variant.VolumeMultiple, false, 1,
-                new RiskBand(600m, 500m), variant.OrbTrailDollars, 0,
-                WeekdaySelection.All, variant.EventRule);
+                new RangeBand(variant.OrbRangeMin, variant.OrbRangeMax), variant.OrbVwap,
+                variant.Threshold, variant.VolumeMultiple, variant.OrbRetest, 1,
+                new RiskBand(variant.OrbRiskCap, variant.OrbFallbackRisk),
+                variant.OrbTrailDollars, 0,
+                variant.WeekdayMask, variant.EventRule);
             var simulated = OptimizationEngine.Evaluate(orbConfig, originalOrbSessions, keepTrades: true);
             foreach (var t in simulated.DetailedTrades ?? [])
             {
@@ -71,9 +93,24 @@ public static class MultiStrategyEngine
             return result;
         }
 
+        var recipe = new SignalKey(variant.Kind, variant.Lookback,
+            variant.Threshold, variant.VolumeMultiple, variant.StartShiftMinutes,
+            variant.RsiExtreme, variant.TrendConfirmation);
+        if (CurrentRecipe != recipe)
+        {
+            SignalCache.Clear();
+            CurrentRecipe = recipe;
+        }
         foreach (var s in sessions)
         {
-            var trade = GenerateDay(variant, s);
+            if (!WeekdaySelection.Includes(variant.WeekdayMask, s.Day.DayOfWeek))
+                continue;
+            if (!SignalCache.TryGetValue(s.Day, out var signal))
+            {
+                signal = FindSignal(variant, s);
+                SignalCache.Add(s.Day, signal);
+            }
+            var trade = MakeTrade(variant, s, signal);
             if (trade is not null &&
                 EconomicCalendar.AllowsEntry(variant.EventRule, s.Day, trade.EntryAt))
                 result.Add(s.Day, trade);
@@ -81,7 +118,29 @@ public static class MultiStrategyEngine
         return result;
     }
 
-    public static MultiStrategyTrade? GenerateDay(MultiStrategyVariant v, MultiSession s)
+    public static MultiStrategyTrade? GenerateDay(MultiStrategyVariant v, MultiSession s) =>
+        WeekdaySelection.Includes(v.WeekdayMask, s.Day.DayOfWeek)
+            ? MakeTrade(v, s, FindSignal(v, s)) : null;
+
+    private static MultiStrategyTrade? MakeTrade(
+        MultiStrategyVariant v, MultiSession s, Signal? signal)
+    {
+        if (signal is null) return null;
+        var bars = v.Slot == MultiStrategySlot.Overnight ? s.Overnight : s.Rth;
+        if (bars is null) return null;
+        var (_, _, lastExit) = Window(v);
+        return SimulateBracket(v, s, bars, signal.Value.Index + 1, lastExit,
+            signal.Value.Side, signal.Value.Atr);
+    }
+
+    private static (int First, int LastSignal, int LastExit) Window(
+        MultiStrategyVariant v)
+    {
+        var (first, lastSignal, _) = Window(v);
+        return (first + v.StartShiftMinutes, lastSignal, lastExit);
+    }
+
+    private static Signal? FindSignal(MultiStrategyVariant v, MultiSession s)
     {
         var overnight = v.Slot == MultiStrategySlot.Overnight;
         var bars = overnight ? s.Overnight : s.Rth;
@@ -118,11 +177,13 @@ public static class MultiStrategyEngine
                     var high = bars.Skip(i - v.Lookback).Take(v.Lookback).Max(b => b.C.H);
                     var low = bars.Skip(i - v.Lookback).Take(v.Lookback).Min(b => b.C.L);
                     if (!VolumePass(bars, i, v.VolumeMultiple)) break;
-                    if (price > high + v.Threshold && m.Ema9[i] > m.Ema21[i] &&
-                        price > m.Vwap[i])
+                    if (price > high + v.Threshold &&
+                        (!v.TrendConfirmation ||
+                         m.Ema9[i] > m.Ema21[i] && price > m.Vwap[i]))
                         side = TradeDirection.Long;
-                    else if (price < low - v.Threshold && m.Ema9[i] < m.Ema21[i] &&
-                             price < m.Vwap[i])
+                    else if (price < low - v.Threshold &&
+                             (!v.TrendConfirmation ||
+                              m.Ema9[i] < m.Ema21[i] && price < m.Vwap[i]))
                         side = TradeDirection.Short;
                     break;
                 }
@@ -131,37 +192,37 @@ public static class MultiStrategyEngine
                 {
                     var rsi = Rsi(bars, i, v.Lookback);
                     if (price > m.Vwap[i] + atr * v.Threshold &&
-                        rsi >= 65m && candle.C < candle.O)
+                        rsi >= v.RsiExtreme && candle.C < candle.O)
                         side = TradeDirection.Short;
                     else if (price < m.Vwap[i] - atr * v.Threshold &&
-                             rsi <= 35m && candle.C > candle.O)
+                             rsi <= 100m - v.RsiExtreme && candle.C > candle.O)
                         side = TradeDirection.Long;
                     break;
                 }
                 case MultiStrategyKind.OvernightMomentum:
+                    if (!VolumePass(bars, i, v.VolumeMultiple)) break;
                     if (price > overnightHigh + atr * v.Threshold &&
-                        m.Ema9[i] > m.Ema21[i])
+                        (!v.TrendConfirmation || m.Ema9[i] > m.Ema21[i]))
                         side = TradeDirection.Long;
                     else if (price < overnightLow - atr * v.Threshold &&
-                             m.Ema9[i] < m.Ema21[i])
+                             (!v.TrendConfirmation || m.Ema9[i] < m.Ema21[i]))
                         side = TradeDirection.Short;
                     break;
                 case MultiStrategyKind.OvernightReversion:
                 {
                     var rsi = Rsi(bars, i, v.Lookback);
                     if (price > overnightHigh + atr * v.Threshold &&
-                        rsi >= 65m && candle.C < candle.O)
+                        rsi >= v.RsiExtreme && candle.C < candle.O)
                         side = TradeDirection.Short;
                     else if (price < overnightLow - atr * v.Threshold &&
-                             rsi <= 35m && candle.C > candle.O)
+                             rsi <= 100m - v.RsiExtreme && candle.C > candle.O)
                         side = TradeDirection.Long;
                     break;
                 }
             }
 
             if (side is null) continue;
-            return SimulateBracket(v, s, bars, i + 1, lastExit,
-                side.Value, atr);
+            return new Signal(i, side.Value, atr);
         }
         return null;
     }

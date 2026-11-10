@@ -60,19 +60,21 @@ The portfolio selects **at most one strategy per time slot**, never overlaps act
 
 **Research caveat:** We have already examined this historical period while developing ORB. Walk-forward testing reduces within-fold hindsight, but this historical dataset is not wholly unexamined; comparing many new ideas on it can still overfit. Never confuse the in-sample best-configuration reports with future returns.
 
-## New multi-strategy reports
+## Multi-strategy terminal reporting (no CSV output)
 
-Pressing Play in default `Multi` mode writes the following reports into `data/`:
+Pressing Play in default `Backtest:Mode=Multi` evaluates the **same 74,560 Deep variants** and all five chronological walk-forward folds, but **does not create any CSV or text report files**. It prints session coverage, progress, per-fold winning configs and OOS scores, overall strategy P&L/win rate/max drawdown, portfolio summary/cost sensitivity, and in-sample maximum-profit configs. Existing report files from earlier runs are left untouched (they are not inputs).
 
-- `multi_strategy_summary.txt` — training-selected portfolio out-of-sample P&L, per-fold results and each strategy's best full-history configuration, profitability, win rate and drawdown.
-- `multi_strategy_full_sample_winners.csv` — highest-**net-profit** **in-sample** candidate for each of the seven strategies and the exact settings, net profit, win rate, drawdown, average trade and profit factor.
-- `multi_strategy_full_sample_highest_win_rate.csv` — highest-**win-rate** candidate in each strategy family, using the same minimum trade-count requirement and reporting its **net profit**, costs, drawdown and settings; this is also **in-sample**.
-- `multi_strategy_individual_walkforward.csv` — the **out-of-sample** result of each strategy's robust training-selected configuration on the next block, with results under **$10, $20 and $30 per-trade costs**.
-- `multi_strategy_individual_oos_summary.csv` — **combined nonoverlapping walk-forward OOS results for every strategy family**, including net profit, win rate, drawdown, profitable fold count and higher-cost sensitivity. Ranking these after the run is descriptive, not a new trained selection rule.
-- `multi_strategy_portfolio_walkforward.csv` — compare **single-strategy**, **fixed multi-session**, and **adaptive-regime** policies with per-fold training and out-of-sample results, training robustness score and higher-cost sensitivity.
-- `multi_strategy_portfolio_trades.csv` and `multi_strategy_portfolio_monthly.csv` — selected portfolio trades, chronological P&L and monthly summaries.
-- `multi_strategy_candidate_scores.csv` — every one of the 74,560 tested candidates with training fold and full-sample metrics, first/second-half net P&L, robustness ranking score and trade-count eligibility. This file streams as the grid runs; incomplete runs leave incomplete scores.
-- `multi_strategy_data_quality.csv` — actual RTH and overnight minute counts, missing windows and excluded dates.
+At the end, the console prints graph-ready **weekly out-of-sample profit** for **every one of the 19 strategies and the selected portfolio**, with one line per strategy per week. Example (illustrative numbers):
+
+```text
+WEEKLY_OOS,week_start_et,week_end_et,strategy,net_usd,cumulative_net_usd,trades
+WEEKLY_OOS,2026-08-31,2026-09-06,MorningMomentum,90.00,90.00,1
+WEEKLY_OOS,2026-09-07,2026-09-13,MorningMomentum,-60.00,30.00,1
+```
+
+Weeks use **Monday–Sunday Eastern calendar dates**, and overnight positions are attributed to their associated RTH trading date. The series cover the complete OOS test interval and explicitly show **zero** on weeks with no trades; cumulative P&L resets at the start of that OOS interval. Profits include the baseline estimated **$10 round-trip per ES**. Each week aggregates **only stitched next-block OOS trades** from each fold's *training-selected* strategy configuration (not the in-sample best result). The final series named `SelectedPortfolio` represents the actual non-overlapping, training-selected policy, not the sum of independently traded strategies. Paste the terminal output into ChatGPT to plot each strategy's weekly or cumulative curve.
+
+**Note:** The separate legacy `Backtest:Mode=Orb` or `Both` exhaustive ORB runner still has its historical report output. `Multi`, the default, is terminal-only.
 
 To compile and run synthetic checks without SQL: `dotnet run -- --self-test`. GitHub Actions also runs a .NET 10 build and these dependency-free tests on each push. For the full historical analysis, your local SQL connection is still required.
 
@@ -112,7 +114,7 @@ Alternatively, use **Manage User Secrets** or the environment variable `Connecti
 - **Time zone**: `America/New_York` interprets `ts_event` as Eastern wall-clock time, the way `orb-analysis` currently uses it for the 9:30 market open. **If your database actually stores UTC timestamps**, change `MarketData:TimestampTimeZone` to `UTC` before running; incorrect settings shift the opening range and invalidate the test.
 - **Pricing**: Despite the table name, these are **ES candles**, so initial 1–2 ES contracts use actual ES OHLC, ES volume and $50/point. Optional Stage-6 **MES reversal** trades still use ES candles as a **price proxy**, with MES $5/point P&L. For overlapping contracts, the loader picks one active ES contract for each trading day, while retaining **all contract months' one-minute candles** for that contract's prior seven-day FVG/reference-level lookback. The daily winner is selected using full-session volume; this roll-selection choice is retrospective, not an execution-time contract selector.
 - **Input coverage**: No date range, row limit, or 42-session cap is applied to the SQL query. The full available data range is loaded; normal RTH session processing requires a complete 15-minute opening range. The console shows **total SQL rows across contracts**, **selected active-contract rows**, complete RTH sessions, and the earliest/latest dates. 
-- **Output**: All existing optimizer reports and trades are still written to `data/` as CSV/text **results**. Input candle CSV files are no longer needed.
+- **Output**: Default `Multi` mode prints all results and dated OOS strategy series to the **terminal only**; no new CSV/text reports. The separate original `Orb` mode retains its legacy file reports. Input candle CSV files are not needed.
 
 The SQL query uses a read-only SELECT. It validates chronological timestamps, unique bars per chosen contract/date, OHLC, and numeric volume. If configuration is missing or no bars match, the program stops with a descriptive error rather than silently analyzing stale CSV data.
 

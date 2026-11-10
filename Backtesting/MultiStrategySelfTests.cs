@@ -149,6 +149,7 @@ public static class MultiStrategySelfTests
                 "multi_strategy_full_sample_highest_win_rate.csv",
                 "multi_strategy_candidate_scores.csv",
                 "multi_strategy_individual_walkforward.csv",
+                "multi_strategy_individual_oos_summary.csv",
                 "multi_strategy_portfolio_walkforward.csv",
                 "multi_strategy_portfolio_trades.csv",
                 "multi_strategy_portfolio_monthly.csv"

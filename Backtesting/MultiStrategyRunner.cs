@@ -36,15 +36,16 @@ public enum MultiPortfolioMode { Single, FixedSessions, AdaptiveRegimes }
 public sealed record MultiPortfolioPolicy(
     MultiPortfolioMode Mode, MultiStrategyKind? SingleStrategy = null,
     decimal NightThreshold = 1m, decimal OrbThreshold = 2m,
-    decimal MorningThreshold = 1m, decimal AfternoonThreshold = 2m)
+    decimal MorningThreshold = 1m, decimal AfternoonThreshold = 2m,
+    bool UseFallbacks = false)
 {
-    public string Description => Mode switch
+    public string Description => (Mode switch
     {
         MultiPortfolioMode.Single => "Single_" + SingleStrategy,
         MultiPortfolioMode.FixedSessions => "Fixed_best_per_session",
         _ => "Adaptive_night" + NightThreshold + "_orb" + OrbThreshold +
              "_morning" + MorningThreshold + "_afternoon" + AfternoonThreshold
-    };
+    }) + (UseFallbacks ? "_fallback" : "");
 }
 
 public static class MultiStrategyRunner
@@ -53,12 +54,13 @@ public static class MultiStrategyRunner
     private const decimal DailyLossStop = 1000m;
     private const int MaxDailyTrades = 3;
 
-    private sealed record Choice(
+    internal sealed record Choice(
         MultiStrategyVariant Variant, MultiScore Score,
         IReadOnlyDictionary<DateOnly, MultiStrategyTrade> Trades,
         decimal Robustness, MultiScore Early, MultiScore Late);
-    private sealed record PortfolioOutcome(
-        MultiPortfolioPolicy Policy, MultiScore Score, List<MultiStrategyTrade> Trades);
+    internal sealed record PortfolioOutcome(
+        MultiPortfolioPolicy Policy, MultiScore Score,
+        List<MultiStrategyTrade> Trades, int FallbackTrades);
 
     public static int Run(
         List<PriceBar> active, List<PriceBar> all, string root,
@@ -230,13 +232,19 @@ public static class MultiStrategyRunner
             foreach (var kind in winners.Keys)
                 candidates.Add(new MultiPortfolioPolicy(MultiPortfolioMode.Single, kind));
             candidates.Add(new MultiPortfolioPolicy(MultiPortfolioMode.FixedSessions));
+            candidates.Add(new MultiPortfolioPolicy(MultiPortfolioMode.FixedSessions,
+                UseFallbacks: true));
             foreach (var overnight in new[] { 1m, 2m })
             foreach (var orbThreshold in new[] { 2m, 3m })
             foreach (var morning in new[] { 1m, 2m })
             foreach (var afternoon in new[] { 2m, 3m })
-                candidates.Add(new MultiPortfolioPolicy(
+            {
+                var basePolicy = new MultiPortfolioPolicy(
                     MultiPortfolioMode.AdaptiveRegimes, null,
-                    overnight, orbThreshold, morning, afternoon));
+                    overnight, orbThreshold, morning, afternoon);
+                candidates.Add(basePolicy);
+                candidates.Add(basePolicy with { UseFallbacks = true });
+            }
 
             var ranked = new List<(MultiPortfolioPolicy Policy, PortfolioOutcome Training, decimal Robustness)>();
             var mid = fold.TrainingStart + fold.TrainingSessions / 2;
@@ -266,7 +274,31 @@ public static class MultiStrategyRunner
             var message = "Fold " + fold.Number + " PORTFOLIO: " +
                 chosenPolicy.Policy.Description + "; train $" +
                 F(chosenPolicy.Training.Score.Net) + "; next-block OOS $" +
-                F(oos.Score.Net) + " (" + oos.Score.Trades + " trades)";
+                F(oos.Score.Net) + " (" + oos.Score.Trades +
+                " trades, " + oos.FallbackTrades + " fallback fills)";
+            var bestFallback = ranked.Where(x => x.Policy.UseFallbacks)
+                .OrderByDescending(x => x.Robustness)
+                .ThenByDescending(x => x.Training.Score.Net)
+                .ThenBy(x => x.Training.Score.Drawdown)
+                .ThenBy(x => x.Policy.Description, StringComparer.Ordinal)
+                .First();
+            var bestOriginal = ranked.Where(x => !x.Policy.UseFallbacks &&
+                x.Policy.Mode != MultiPortfolioMode.Single)
+                .OrderByDescending(x => x.Robustness)
+                .ThenByDescending(x => x.Training.Score.Net)
+                .ThenBy(x => x.Training.Score.Drawdown)
+                .ThenBy(x => x.Policy.Description, StringComparer.Ordinal)
+                .First();
+            var fallbackOos = EvaluatePortfolio(bestFallback.Policy, winners,
+                sessions, fold.TestStart, fold.TestEnd);
+            var originalOos = EvaluatePortfolio(bestOriginal.Policy, winners,
+                sessions, fold.TestStart, fold.TestEnd);
+            Console.WriteLine("Fold " + fold.Number + " ROUTING COMPARISON (training-ranked): " +
+                "no fallback $" + F(originalOos.Score.Net) + " (" +
+                originalOos.Score.Trades + " trades); fallback $" +
+                F(fallbackOos.Score.Net) + " (" +
+                fallbackOos.Score.Trades + " trades, " +
+                fallbackOos.FallbackTrades + " fallback fills)");
             Console.WriteLine(message);
             summary.Add(message);
             summary.Add("");

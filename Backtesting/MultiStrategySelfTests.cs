@@ -57,8 +57,8 @@ public static class MultiStrategySelfTests
                 "Smoke grid must contain 416 unique variants.");
             var deepVariants = MultiStrategyEngine.EnumerateVariants(MultiSearchProfile.Deep);
             Ensure(deepVariants.Count == deepVariants.Select(x => x.Id).Distinct().Count() &&
-                   deepVariants.Count == 40448,
-                "Deep grid must contain 40,448 unique reviewed configurations.");
+                   deepVariants.Count == 60160,
+                "Deep grid must contain 60,160 unique reviewed configurations.");
             Ensure(Enum.GetValues<MultiStrategyKind>().All(k =>
                 deepVariants.Any(v => v.Kind == k)),
                 "Deep grid must cover all seven strategy families.");

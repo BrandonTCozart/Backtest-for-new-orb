@@ -136,7 +136,16 @@ public static class MultiStrategyEngine
     private static (int First, int LastSignal, int LastExit) Window(
         MultiStrategyVariant v)
     {
-        var (first, lastSignal, _) = Window(v);
+        var (first, lastSignal, lastExit) = v.Kind switch
+        {
+            MultiStrategyKind.MorningMomentum => (15, 90, 119),
+            MultiStrategyKind.MorningVwapReversion => (30, 105, 119),
+            MultiStrategyKind.AfternoonMomentum => (210, 330, 384),
+            MultiStrategyKind.AfternoonVwapReversion => (210, 335, 384),
+            MultiStrategyKind.OvernightMomentum => (60, 180, 839),
+            MultiStrategyKind.OvernightReversion => (60, 180, 839),
+            _ => throw new ArgumentOutOfRangeException(nameof(v.Kind))
+        };
         return (first + v.StartShiftMinutes, lastSignal, lastExit);
     }
 
@@ -149,16 +158,7 @@ public static class MultiStrategyEngine
 
         // Signals are always made on COMPLETED one-minute bars; entry is
         // the next minute's OPEN. No future indicators enter the decision.
-        var (first, lastSignal, lastExit) = v.Kind switch
-        {
-            MultiStrategyKind.MorningMomentum => (15, 90, 119),
-            MultiStrategyKind.MorningVwapReversion => (30, 105, 119),
-            MultiStrategyKind.AfternoonMomentum => (210, 330, 384),
-            MultiStrategyKind.AfternoonVwapReversion => (210, 335, 384),
-            MultiStrategyKind.OvernightMomentum => (60, 180, 839),
-            MultiStrategyKind.OvernightReversion => (60, 180, 839),
-            _ => throw new ArgumentOutOfRangeException(nameof(v.Kind))
-        };
+        var (first, lastSignal, _) = Window(v);
 
         var overnightHigh = overnight ? bars.Take(60).Max(b => b.C.H) : 0m;
         var overnightLow = overnight ? bars.Take(60).Min(b => b.C.L) : 0m;

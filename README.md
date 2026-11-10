@@ -1,6 +1,6 @@
 # ES Multi-Strategy Backtester + Original ORB Optimizer
 
-Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The program reads **ES futures one-minute candles from SQL Server `dbo.MES_DATA`** (the table name is legacy; the data are ES). By default it runs a **19-family multi-strategy comparative backtest**. No live orders, Topstep downloads or candle CSV inputs are used.
+Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The program reads **ES futures one-minute candles from SQL Server `dbo.MES_DATA`** (the table name is legacy; the data are ES). The current default runs a **frozen 19-family historical replay on MES_DATA_2020_2025**, using the most recent MES_DATA walk-forward's chosen configurations. No live orders, Topstep downloads or candle CSV inputs are used.
 
 ## Choose which research to run
 
@@ -8,11 +8,12 @@ Set `Backtest:Mode` in `appsettings.json` or a local override:
 
 | Mode | What runs |
 | --- | --- |
-| `Multi` **(default)** | New multi-strategy grid, individual strategy walk-forward tests, and a strategy-routing portfolio |
+| `Multi` | New multi-strategy grid, individual strategy walk-forward tests, and a strategy-routing portfolio |
+| `HistoricalReplay` **(current default)** | Replay the 19 final-fold MES_DATA configurations on `dbo.MES_DATA_2020_2025`, without optimizing on older data; print weekly results and totals |
 | `Orb` | Original exhaustive 2,571,264-configuration ORB optimizer and its separate walk-forward reports |
 | `Both` | Run multi-strategy first, then the original exhaustive ORB optimizer |
 
-The default **Deep** multi-strategy search evaluates **74,560 configurations across 19 separately ranked strategy families**: the original 60,160 configurations (including 20,736 staged ORB variants) plus **14,400 new price-action configurations** for six additional entry concepts, each tested independently in morning and afternoon sessions. The independent **original exhaustive ORB** search is still available under `Orb` or `Both` mode. Deep adds variations of entry windows, moving-average confirmation, VWAP filters, breakout buffers, RSI extremes, relative volume, ATR stops, targets, weekday restrictions, OR width, retests and economic-event rules. The lighter `Smoke` profile (440 candidates, including all 19 families) exists only for quick regression/development tests.
+The **Deep** multi-strategy search in `Multi` mode evaluates **74,560 configurations across 19 separately ranked strategy families**: the original 60,160 configurations (including 20,736 staged ORB variants) plus **14,400 new price-action configurations** for six additional entry concepts, each tested independently in morning and afternoon sessions. The independent **original exhaustive ORB** search is still available under `Orb` or `Both` mode. Deep adds variations of entry windows, moving-average confirmation, VWAP filters, breakout buffers, RSI extremes, relative volume, ATR stops, targets, weekday restrictions, OR width, retests and economic-event rules. The lighter `Smoke` profile (440 candidates, including all 19 families) exists only for quick regression/development tests.
 
 Set `Backtest:SearchProfile` to `Deep` (default) or `Smoke` independently of `Backtest:Mode`. There is no automatic early cutoff or maximum runtime; Deep finishes its full disclosed grid before selecting the results.
 
@@ -60,9 +61,29 @@ The portfolio selects **at most one strategy per time slot**, never overlaps act
 
 **Research caveat:** We have already examined this historical period while developing ORB. Walk-forward testing reduces within-fold hindsight, but this historical dataset is not wholly unexamined; comparing many new ideas on it can still overfit. Never confuse the in-sample best-configuration reports with future returns.
 
+## 2020–2025 historical frozen-configuration replay (current Play mode)
+
+With `Backtest:Mode=HistoricalReplay` and `Backtest:SearchProfile=Deep`, the program:
+
+1. Reads `dbo.MES_DATA` (the recent 2025–2026 candles), reconstructs **training-only robustness rankings** for the **19 pinned configurations actually selected in the last (fifth) MES_DATA walk-forward fold**, and retains only those scores and configuration settings.
+2. Reads `dbo.MES_DATA_2020_2025` from the **same SQL database/connection**, validates completed sessions and active ES contract rollovers, and simulates **only the frozen 19 configurations** on those older candles. It never searches, selects, or changes a strategy using historical replay profits.
+3. Replays the final-fold portfolio policy **`Fixed_best_per_session` with no fallback**, using recent-data training ranks to choose the overnight, morning and afternoon strategies, while separately comparing the identical frozen rankings with fallback enabled.
+4. Prints a terminal-only `REPLAY_TOTAL` table for all 19 strategies, selected portfolio and fallback portfolio: full replay P&L, **clean non-overlap P&L before October 6, 2025**, overlap-period P&L, trade count, win rate and closed-trade max drawdown. Prints a `REPLAY_ROUTER` comparison and graph-ready **`WEEKLY_REPLAY` Monday–Sunday rows** with weekly net, cumulative P&L and trade counts, including zero-trade weeks. **No CSV or text files are created.**
+
+The pinned final-fold IDs are saved in `Backtesting/HistoricalReplayRunner.cs` and correspond to the most recently provided 2025–2026 run, e.g. `MorningMomentum=24958`, `MorningLiquiditySweep=72471`, and `Orb=16184`. The program checks that each ID still resolves to the correct Deep-grid strategy family; if the parameter grid later changes, update the pinned IDs from a fresh recent-period walk-forward output.
+
+```text
+REPLAY_TOTAL,strategy,total_net_usd,clean_pretraining_net_usd,overlap_net_usd,trades,win_rate_pct,max_closed_trade_drawdown_usd
+WEEKLY_REPLAY,week_start_et,week_end_et,strategy,net_usd,cumulative_net_usd,trades
+```
+
+**Data-coverage limitation:** The embedded macroeconomic-event calendar only contains scheduled announcements beginning **2025-10-06**. Any frozen variant with an active news-event exclusion rule will **not correctly exclude historical announcement dates in 2020–early 2025** until that calendar is expanded. The program identifies affected strategies in the terminal. This matters when interpreting the results, even though the price data and trading costs are otherwise reused unchanged. Historical dates from October 6, 2025 onward can overlap the original configuration-selection period, so the replay reports earlier, clean non-overlapping dates separately.
+
+To switch back to the prior grid/walk-forward behavior, change `Backtest:Mode` in `appsettings.json` to `"Multi"`. No other program settings need changing. The SQL table name is strictly whitelisted to these two read-only ES sources.
+
 ## Multi-strategy terminal reporting (no CSV output)
 
-Pressing Play in default `Backtest:Mode=Multi` evaluates the **same 74,560 Deep variants** and all five chronological walk-forward folds, but **does not create any CSV or text report files**. It prints session coverage, progress, per-fold winning configs and OOS scores, the original-versus-fallback router comparison, overall strategy P&L/win rate/max drawdown, portfolio summary/cost sensitivity, and in-sample maximum-profit configs. Existing report files from earlier runs are left untouched (they are not inputs).
+Setting `Backtest:Mode=Multi` evaluates the **same 74,560 Deep variants** and all five chronological walk-forward folds, but **does not create any CSV or text report files**. It prints session coverage, progress, per-fold winning configs and OOS scores, the original-versus-fallback router comparison, overall strategy P&L/win rate/max drawdown, portfolio summary/cost sensitivity, and in-sample maximum-profit configs. Existing report files from earlier runs are left untouched (they are not inputs).
 
 At the end, the console prints graph-ready **weekly out-of-sample profit** for **every one of the 19 strategies and the selected portfolio**, with one line per strategy per week. Example (illustrative numbers):
 
@@ -111,18 +132,18 @@ Alternatively, use **Manage User Secrets** or the environment variable `Connecti
     "TimestampTimeZone": "America/New_York"
   },
   "Backtest": {
-    "Mode": "Multi",
+    "Mode": "HistoricalReplay",
     "SearchProfile": "Deep"
   }
 }
 ```
 
-- **Table**: `dbo.MES_DATA` (historically misnamed; it stores **ES** contracts) with columns `ts_event`, `symbol`, `open`, `high`, `low`, `close`, `volume`. All matching rows are loaded in chronological order; the date range is whatever is actually available in SQL.
+- **Table**: `dbo.MES_DATA` for optimization or `dbo.MES_DATA_2020_2025` for frozen historical replay (both contain **ES** contracts) with columns `ts_event`, `symbol`, `open`, `high`, `low`, `close`, `volume`. All matching rows are loaded in chronological order; the date range is whatever is actually available in SQL.
 - **Symbol**: Empty by default. SQL contract symbols are `ESZ5`, `ESH6`, `ESM6`, `ESU6`, `ESZ6`, etc., not the literal `MES`. With an empty symbol, the loader picks the highest-volume regular-session symbol for each Eastern date and keeps that one contract for the day (no mixing contracts within a trading day). To use one specific symbol instead, set `MarketData:Symbol` to the exact value in the database. If it finds no rows, it prints available symbols and counts.
 - **Time zone**: `America/New_York` interprets `ts_event` as Eastern wall-clock time, the way `orb-analysis` currently uses it for the 9:30 market open. **If your database actually stores UTC timestamps**, change `MarketData:TimestampTimeZone` to `UTC` before running; incorrect settings shift the opening range and invalidate the test.
 - **Pricing**: Despite the table name, these are **ES candles**, so initial 1–2 ES contracts use actual ES OHLC, ES volume and $50/point. Optional Stage-6 **MES reversal** trades still use ES candles as a **price proxy**, with MES $5/point P&L. For overlapping contracts, the loader picks one active ES contract for each trading day, while retaining **all contract months' one-minute candles** for that contract's prior seven-day FVG/reference-level lookback. The daily winner is selected using full-session volume; this roll-selection choice is retrospective, not an execution-time contract selector.
 - **Input coverage**: No date range, row limit, or 42-session cap is applied to the SQL query. The full available data range is loaded; normal RTH session processing requires a complete 15-minute opening range. The console shows **total SQL rows across contracts**, **selected active-contract rows**, complete RTH sessions, and the earliest/latest dates. 
-- **Output**: Default `Multi` mode prints all results and dated OOS strategy series to the **terminal only**; no new CSV/text reports. The separate original `Orb` mode retains its legacy file reports. Input candle CSV files are not needed.
+- **Output**: `Multi` mode prints all results and dated OOS strategy series to the **terminal only**; no new CSV/text reports. The separate original `Orb` mode retains its legacy file reports. Input candle CSV files are not needed.
 
 The SQL query uses a read-only SELECT. It validates chronological timestamps, unique bars per chosen contract/date, OHLC, and numeric volume. If configuration is missing or no bars match, the program stops with a descriptive error rather than silently analyzing stale CSV data.
 

@@ -117,7 +117,7 @@ def fed():
         # Official FOMC statement release URLs include the meeting date.
         href = anchor["href"]
         m = re.search(r"/newsevents/pressreleases/monetary(20\d{6})a?\.htm", href)
-        if not m or "statement" not in anchor.get_text(" ", strip=True).lower():
+        if not m:
             continue
         day = dt.datetime.strptime(m.group(1), "%Y%m%d").date()
         if START <= day <= END:

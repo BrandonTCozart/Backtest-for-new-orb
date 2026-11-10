@@ -229,7 +229,10 @@ public static class MultiStrategySelfTests
                    replayOutput.Split('\n').Count(x =>
                        x.StartsWith("WEEKLY_REPLAY,", StringComparison.Ordinal)) > 21 &&
                    replayOutput.Contains("REPLAY_ROUTER,Fixed_best_per_session,") &&
-                   replayOutput.Contains("REPLAY_ROUTER,Fixed_best_per_session_fallback,"),
+                   replayOutput.Contains("REPLAY_ROUTER,Fixed_best_per_session_fallback,") &&
+                   replayOutput.Contains("YEARLY_REPLAY,year,strategy,net_usd,trades,win_rate_pct") &&
+                   replayOutput.Contains(",SelectedPortfolio,") &&
+                   replayOutput.Contains(",FallbackPortfolio,"),
                 "Historical replay should output each strategy and both router policies.");
             Ensure(!Directory.Exists(folder) ||
                    !Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories).Any(),

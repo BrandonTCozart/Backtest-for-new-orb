@@ -64,11 +64,10 @@ public static class MultiStrategyRunner
         List<PriceBar> active, List<PriceBar> all, string root,
         MultiSearchProfile profile = MultiSearchProfile.Deep)
     {
-        var dir = Path.Combine(root, "data");
-        Directory.CreateDirectory(dir);
+        // No report artifacts are written. The SQL run reports results in the terminal.
         Console.WriteLine();
         Console.WriteLine("=== DEEP MULTI-STRATEGY ES RESEARCH (NO LIVE ORDERS) ===");
-        var sessions = MultiStrategyData.Build(active, all, dir);
+        var sessions = MultiStrategyData.Build(active, all, Path.Combine(root, "data"));
         if (sessions.Count < 20)
         {
             Console.Error.WriteLine("Need at least 20 validated full-length RTH sessions.");
@@ -96,8 +95,7 @@ public static class MultiStrategyRunner
         Console.WriteLine(folds.Length + " chronological walk-forward folds; robustness-scored training split.");
         Console.WriteLine("Session positions do not overlap; 1 ES on new strategies; " +
                           "stops capped at $600 including estimated $10/contract costs.");
-        Console.WriteLine("Results stream to data/multi_strategy_candidate_scores.csv; " +
-                          "only current candidate and selected winners are retained in memory.");
+        Console.WriteLine("Console-only reporting; only current candidate and selected winners are retained in memory.");
 
         var bestForFold = folds.Select(_ => new Dictionary<MultiStrategyKind, Choice>())
             .ToArray();
@@ -105,12 +103,10 @@ public static class MultiStrategyRunner
         var fullWinRate = new Dictionary<MultiStrategyKind, Choice>();
         var eligible = new int[folds.Length];
         var minimumFull = Math.Max(10, (sessions.Count + 3) / 4);
-        var candidatesPath = Path.Combine(dir, "multi_strategy_candidate_scores.csv");
         MultiStrategyEngine.ClearCaches();
         OptimizationEngine.ClearCaches();
-        using (var writer = new StreamWriter(candidatesPath, false))
         {
-            writer.WriteLine("fold,period,strategy,variant_id,trades,wins,win_rate_pct,net,gross,costs,drawdown,profit_factor,average_trade,early_net,late_net,robustness,qualified,parameters");
+            // Full parameter grid still evaluated, without per-candidate disk I/O.
             var tested = 0;
             foreach (var variant in variants)
             {
@@ -119,8 +115,6 @@ public static class MultiStrategyRunner
                 var trades = MultiStrategyEngine.Generate(variant, sessions, originalOrb);
                 var full = ScoreRange(trades, sessions, 0, sessions.Count);
                 var fullQualifies = full.Trades >= minimumFull;
-                writer.WriteLine(ScoreRow(0, "FULL_IN_SAMPLE", variant, full,
-                    null, null, null, fullQualifies));
                 if (fullQualifies)
                 {
                     var candidate = new Choice(variant, full, trades, full.Net,
@@ -147,8 +141,6 @@ public static class MultiStrategyRunner
                     // Penalize both high peak-to-trough drawdown and dependence
                     // on an unprofitable training half. This does not use OOS.
                     var robustness = Robustness(train, early, late);
-                    writer.WriteLine(ScoreRow(fold.Number, "TRAIN", variant,
-                        train, early, late, robustness, qualifies));
                     if (!qualifies) continue;
                     eligible[f]++;
                     var candidate = new Choice(variant, train, trades,
@@ -161,7 +153,6 @@ public static class MultiStrategyRunner
                 tested++;
                 if (tested % 500 == 0)
                 {
-                    writer.Flush();
                     Console.WriteLine("Deep multi-strategy grid: " +
                                       tested.ToString("N0", Ci) + "/" +
                                       variants.Count.ToString("N0", Ci));
@@ -174,12 +165,6 @@ public static class MultiStrategyRunner
             }
         }
 
-        var individuals = new List<string> {
-            "fold,strategy,variant_id,train_start,train_end,test_start,test_end,train_trades,train_net,train_win_pct,train_drawdown,train_early_net,train_late_net,train_robustness,test_trades,test_net,test_win_pct,test_drawdown,test_net_at_20_cost,test_net_at_30_cost,parameters"
-        };
-        var portfolios = new List<string> {
-            "fold,policy,selected,train_start,train_end,test_start,test_end,train_trades,train_net,train_win_pct,train_drawdown,train_robustness,test_trades,test_net,test_win_pct,test_drawdown,test_profit_factor,test_net_at_20_cost,test_net_at_30_cost"
-        };
         var chosenOos = new List<(int Fold, MultiStrategyTrade Trade)>();
         var individualOos = kinds.ToDictionary(k => k,
             _ => new List<MultiStrategyTrade>());
@@ -229,17 +214,6 @@ public static class MultiStrategyRunner
                 var test = MultiScore.From(testTrades);
                 individualOos[kind].AddRange(testTrades);
                 individualFoldResults[kind].Add(test.Net);
-                individuals.Add(string.Join(",", fold.Number, kind, chosen.Variant.Id,
-                    Day(sessions[fold.TrainingStart].Day),
-                    Day(sessions[fold.TrainingEnd - 1].Day),
-                    Day(sessions[fold.TestStart].Day),
-                    Day(sessions[fold.TestEnd - 1].Day),
-                    chosen.Score.Trades, F(chosen.Score.Net),
-                    F(chosen.Score.WinRate), F(chosen.Score.Drawdown),
-                    F(chosen.Early.Net), F(chosen.Late.Net), F(chosen.Robustness),
-                    test.Trades, F(test.Net), F(test.WinRate), F(test.Drawdown),
-                    F(SensitiveNet(test, 20m)), F(SensitiveNet(test, 30m)),
-                    chosen.Variant.Parameters));
                 var reportLine = "  " + kind + ": config " + chosen.Variant.Id +
                     ", train $" + F(chosen.Score.Net) +
                     " (early $" + F(chosen.Early.Net) +
@@ -286,27 +260,6 @@ public static class MultiStrategyRunner
                 .ThenBy(x => x.Policy.Description, StringComparer.Ordinal)
                 .First();
 
-            foreach (var item in ranked)
-            {
-                var tested = EvaluatePortfolio(item.Policy, winners, sessions,
-                    fold.TestStart, fold.TestEnd);
-                portfolios.Add(string.Join(",", fold.Number,
-                    item.Policy.Description,
-                    item.Policy == chosenPolicy.Policy ? "yes" : "no",
-                    Day(sessions[fold.TrainingStart].Day),
-                    Day(sessions[fold.TrainingEnd - 1].Day),
-                    Day(sessions[fold.TestStart].Day),
-                    Day(sessions[fold.TestEnd - 1].Day),
-                    item.Training.Score.Trades, F(item.Training.Score.Net),
-                    F(item.Training.Score.WinRate),
-                    F(item.Training.Score.Drawdown), F(item.Robustness),
-                    tested.Score.Trades, F(tested.Score.Net),
-                    F(tested.Score.WinRate), F(tested.Score.Drawdown),
-                    F(tested.Score.ProfitFactor),
-                    F(SensitiveNet(tested.Score, 20m)),
-                    F(SensitiveNet(tested.Score, 30m))));
-            }
-
             var oos = EvaluatePortfolio(chosenPolicy.Policy, winners, sessions,
                 fold.TestStart, fold.TestEnd);
             chosenOos.AddRange(oos.Trades.Select(t => (fold.Number, t)));
@@ -322,20 +275,11 @@ public static class MultiStrategyRunner
         // Each strategy's five nonoverlapping NEXT-BLOCK tests are combined
         // without using those returns to choose fold configurations.
         // This is a diagnostic ranking after the research, not a new live rule.
-        var individualTotals = new List<string> {
-            "strategy,test_folds,trades,wins,win_rate_pct,stitched_oos_net,gross,costs,max_closed_trade_drawdown,profit_factor,average_trade,positive_folds,net_at_20_cost,net_at_30_cost"
-        };
         var oosStrategyScores = new List<(MultiStrategyKind Kind, MultiScore Score)>();
         foreach (var kind in kinds)
         {
             var score = MultiScore.From(individualOos[kind]);
             oosStrategyScores.Add((kind, score));
-            individualTotals.Add(string.Join(",", kind,
-                individualFoldResults[kind].Count, score.Trades, score.Wins,
-                F(score.WinRate), F(score.Net), F(score.Gross), F(score.Costs),
-                F(score.Drawdown), F(score.ProfitFactor), F(score.Average),
-                individualFoldResults[kind].Count(n => n > 0m),
-                F(SensitiveNet(score, 20m)), F(SensitiveNet(score, 30m))));
         }
         summary.Add("STITCHED STANDALONE STRATEGY OOS TOTALS (POST-HOC COMPARISON; not a training rule)");
         foreach (var (kind, score) in oosStrategyScores
@@ -348,12 +292,6 @@ public static class MultiStrategyRunner
                         "/" + individualFoldResults[kind].Count);
         summary.Add("");
 
-        var fullWinners = new List<string> {
-            "strategy,config_id,trades,wins,win_rate_pct,net,gross,costs,drawdown,profit_factor,avg_trade,net_at_20_cost,net_at_30_cost,parameters"
-        };
-        var highWin = new List<string>(fullWinners);
-        highWin.Clear();
-        highWin.Add(fullWinners[0]);
         summary.Add("FULL-SAMPLE STRATEGY WINNERS — ALL IN-SAMPLE; minimum ES trades " +
                     minimumFull);
         foreach (var kind in kinds)
@@ -363,14 +301,12 @@ public static class MultiStrategyRunner
                 summary.Add("  " + kind + ": no eligible full-data configuration.");
                 continue;
             }
-            fullWinners.Add(WinnerRow(profit));
             summary.Add("  " + kind + " MAX NET: config " + profit.Variant.Id +
                 ", net $" + F(profit.Score.Net) + ", win " +
                 F(profit.Score.WinRate) + "%, " + profit.Score.Trades +
                 " trades, drawdown $" + F(profit.Score.Drawdown));
             if (fullWinRate.TryGetValue(kind, out var winRate))
             {
-                highWin.Add(WinnerRow(winRate));
                 summary.Add("  " + kind + " MAX WIN RATE: config " + winRate.Variant.Id +
                     ", " + F(winRate.Score.WinRate) + "% on " +
                     winRate.Score.Trades + " trades, net $" + F(winRate.Score.Net));
@@ -379,32 +315,6 @@ public static class MultiStrategyRunner
 
         var oosSorted = chosenOos.OrderBy(x => x.Trade.EntryAt).ToArray();
         var oosScore = MultiScore.From(oosSorted.Select(x => x.Trade));
-        var tradeReport = new List<string> {
-            "fold,session_date_et,strategy,config_id,contract,direction,entry_et,exit_et,entry_price,exit_price,exit_reason,gross,costs,net,cumulative_oos_net"
-        };
-        decimal running = 0m;
-        foreach (var entry in oosSorted)
-        {
-            var t = entry.Trade;
-            running += t.Net;
-            tradeReport.Add(string.Join(",", entry.Fold, Day(t.Day), t.Kind,
-                t.VariantId, t.Contract, t.Side, Et(t.EntryAt), Et(t.ExitAt),
-                F(t.Entry), F(t.Exit), t.ExitReason, F(t.Gross),
-                F(t.Costs), F(t.Net), F(running)));
-        }
-        var monthly = new List<string> { "month_et,trades,wins,net,cumulative_net" };
-        decimal monthlyNet = 0m;
-        foreach (var group in oosSorted.GroupBy(x =>
-            (x.Trade.Day.Year, x.Trade.Day.Month))
-            .OrderBy(x => x.Key.Year).ThenBy(x => x.Key.Month))
-        {
-            var monthlyScore = MultiScore.From(group.Select(x => x.Trade));
-            monthlyNet += monthlyScore.Net;
-            monthly.Add(group.Key.Year.ToString("D4", Ci) + "-" +
-                        group.Key.Month.ToString("D2", Ci) + "," +
-                        monthlyScore.Trades + "," + monthlyScore.Wins + "," +
-                        F(monthlyScore.Net) + "," + F(monthlyNet));
-        }
         summary.Add("");
         summary.Add("STITCHED WALK-FORWARD OOS NET: $" + F(oosScore.Net) +
             "; " + oosScore.Trades + " trades; win rate " +
@@ -412,18 +322,6 @@ public static class MultiStrategyRunner
             F(oosScore.Drawdown) + "; profit factor " + F(oosScore.ProfitFactor));
         summary.Add("OOS NET IF $20/ES COST: $" + F(SensitiveNet(oosScore, 20m)) +
                     "; IF $30/ES COST: $" + F(SensitiveNet(oosScore, 30m)));
-        summary.Add("All policy candidates (including policies NOT chosen) have TRAIN and " +
-                    "following TEST performance in multi_strategy_portfolio_walkforward.csv.");
-
-        File.WriteAllLines(Path.Combine(dir, "multi_strategy_individual_walkforward.csv"), individuals);
-        File.WriteAllLines(Path.Combine(dir, "multi_strategy_individual_oos_summary.csv"), individualTotals);
-        File.WriteAllLines(Path.Combine(dir, "multi_strategy_portfolio_walkforward.csv"), portfolios);
-        File.WriteAllLines(Path.Combine(dir, "multi_strategy_portfolio_trades.csv"), tradeReport);
-        File.WriteAllLines(Path.Combine(dir, "multi_strategy_portfolio_monthly.csv"), monthly);
-        File.WriteAllLines(Path.Combine(dir, "multi_strategy_full_sample_winners.csv"), fullWinners);
-        File.WriteAllLines(Path.Combine(dir, "multi_strategy_full_sample_highest_win_rate.csv"), highWin);
-        File.WriteAllLines(Path.Combine(dir, "multi_strategy_summary.txt"), summary);
-
         Console.WriteLine();
         Console.WriteLine("=== DEEP MULTI-STRATEGY WALK-FORWARD RESULTS ===");
         Console.WriteLine("Training-selected combined OOS $" + F(oosScore.Net) +
@@ -437,11 +335,6 @@ public static class MultiStrategyRunner
                      .OrderByDescending(x => x.Score.Net))
             Console.WriteLine("  " + kind + ": net $" + F(score.Net) +
                 ", trades " + score.Trades + ", win rate " + F(score.WinRate) + "%");
-        Console.WriteLine("Files: data/multi_strategy_summary.txt; " +
-            "multi_strategy_candidate_scores.csv; individual_walkforward; " +
-            "individual_oos_summary; " +
-            "portfolio_walkforward; full_sample_winners; full_sample_highest_win_rate; " +
-            "portfolio_trades; data_quality.");
         return 0;
     }
 

@@ -82,7 +82,7 @@ public static class MultiStrategyRunner
         var originalOrb = OptimizationData.Prepare(active, all)
             .Where(x => x.Range is not null && days.Contains(x.Day))
             .OrderBy(x => x.Day).ToArray();
-        var folds = WalkForwardFold.Create(sessions.Count);
+        var folds = CreateResearchFolds(sessions.Count);
         var variants = MultiStrategyEngine.EnumerateVariants(profile);
         var kinds = Enum.GetValues<MultiStrategyKind>();
         var countByKind = variants.GroupBy(v => v.Kind)
@@ -93,7 +93,7 @@ public static class MultiStrategyRunner
         foreach (var kind in kinds)
             Console.WriteLine("  " + kind + ": " + countByKind[kind].ToString("N0", Ci) +
                               " configurations");
-        Console.WriteLine("Three chronological walk-forward folds; robustness-scored training split.");
+        Console.WriteLine(folds.Length + " chronological walk-forward folds; robustness-scored training split.");
         Console.WriteLine("Session positions do not overlap; 1 ES on new strategies; " +
                           "stops capped at $600 including estimated $10/contract costs.");
         Console.WriteLine("Results stream to data/multi_strategy_candidate_scores.csv; " +
@@ -398,6 +398,25 @@ public static class MultiStrategyRunner
             "portfolio_walkforward; full_sample_winners; full_sample_highest_win_rate; " +
             "portfolio_trades; data_quality.");
         return 0;
+    }
+
+    // With >=60 validated sessions, use five expanding-window tests following
+    // the first 40% of the dates. Every subsequent day appears in exactly one
+    // test block, and no fold's own test dates enter its training selection.
+    // A small 25-session synthetic test retains the legacy three folds.
+    private static WalkForwardFold[] CreateResearchFolds(int totalSessions)
+    {
+        if (totalSessions < 60)
+            return WalkForwardFold.Create(totalSessions);
+        var firstTraining = totalSessions * 2 / 5;
+        var remaining = totalSessions - firstTraining;
+        return Enumerable.Range(0, 5)
+            .Select(i =>
+            {
+                var testStart = firstTraining + remaining * i / 5;
+                var testEnd = firstTraining + remaining * (i + 1) / 5;
+                return new WalkForwardFold(i + 1, 0, testStart, testStart, testEnd);
+            }).ToArray();
     }
 
     // All scores derive ONLY from individual trade outcomes on the requested

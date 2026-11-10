@@ -14,12 +14,18 @@ public enum MultiStrategyKind
     AfternoonVwapReversion,
     OvernightMomentum,
     OvernightReversion,
-    SupportResistanceBounce,
-    SupportResistanceBreakout,
-    BreakoutRetest,
-    FibonacciRetracement,
-    FibonacciExtension,
-    LiquiditySweep
+    MorningSupportResistanceBounce,
+    AfternoonSupportResistanceBounce,
+    MorningSupportResistanceBreakout,
+    AfternoonSupportResistanceBreakout,
+    MorningBreakoutRetest,
+    AfternoonBreakoutRetest,
+    MorningFibonacciRetracement,
+    AfternoonFibonacciRetracement,
+    MorningFibonacciExtension,
+    AfternoonFibonacciExtension,
+    MorningLiquiditySweep,
+    AfternoonLiquiditySweep
 }
 
 public enum MultiStrategySlot { Overnight, Morning, Afternoon }
@@ -55,7 +61,13 @@ public sealed record MultiStrategyVariant(
     public MultiStrategySlot Slot => ResearchSlot ?? (Kind switch
     {
         MultiStrategyKind.OvernightMomentum or MultiStrategyKind.OvernightReversion => MultiStrategySlot.Overnight,
-        MultiStrategyKind.AfternoonMomentum or MultiStrategyKind.AfternoonVwapReversion => MultiStrategySlot.Afternoon,
+        MultiStrategyKind.AfternoonMomentum or MultiStrategyKind.AfternoonVwapReversion or
+        MultiStrategyKind.AfternoonSupportResistanceBounce or
+        MultiStrategyKind.AfternoonSupportResistanceBreakout or
+        MultiStrategyKind.AfternoonBreakoutRetest or
+        MultiStrategyKind.AfternoonFibonacciRetracement or
+        MultiStrategyKind.AfternoonFibonacciExtension or
+        MultiStrategyKind.AfternoonLiquiditySweep => MultiStrategySlot.Afternoon,
         _ => MultiStrategySlot.Morning
     });
 

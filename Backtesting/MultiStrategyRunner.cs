@@ -334,9 +334,83 @@ public static class MultiStrategyRunner
         foreach (var (kind, score) in oosStrategyScores
                      .OrderByDescending(x => x.Score.Net))
             Console.WriteLine("  " + kind + ": net $" + F(score.Net) +
-                ", trades " + score.Trades + ", win rate " + F(score.WinRate) + "%");
+                ", trades " + score.Trades + ", win rate " + F(score.WinRate) +
+                "%, max closed-trade drawdown $" + F(score.Drawdown) +
+                ", profitable folds " + individualFoldResults[kind].Count(x => x > 0m) +
+                "/" + individualFoldResults[kind].Count);
+
+        // The weekly output uses exclusively nonoverlapping, training-selected
+        // OOS trades. Calendar grouping is Monday-Sunday in ET, assigning
+        // overnight P&L to its associated regular trading-session date.
+        // Zero-trade weeks are explicit so chart series always line up.
+        var weekly = BuildWeeklyOosRows(individualOos,
+            oosSorted.Select(x => x.Trade).ToArray(),
+            sessions[folds[0].TestStart].Day,
+            sessions[folds[^1].TestEnd - 1].Day);
+        Console.WriteLine();
+        Console.WriteLine("=== WEEKLY STANDALONE STRATEGY AND PORTFOLIO OOS PNL (USD) ===");
+        Console.WriteLine("Weeks are Monday-Sunday ET; profits include $10/ES estimated round-trip costs.");
+        Console.WriteLine("Each strategy switches only at walk-forward fold boundaries; weeks without trades have net 0.");
+        Console.WriteLine("WEEKLY_OOS,week_start_et,week_end_et,strategy,net_usd,cumulative_net_usd,trades");
+        foreach (var week in weekly)
+            Console.WriteLine("WEEKLY_OOS," + Day(week.WeekStart) + "," +
+                Day(week.WeekEnd) + "," + week.Strategy + "," +
+                F(week.Net) + "," + F(week.Cumulative) + "," + week.Trades);
+
+        Console.WriteLine();
+        Console.WriteLine("Full-sample MAX NET configurations (IN-SAMPLE diagnostics only):");
+        foreach (var kind in kinds)
+            if (fullProfit.TryGetValue(kind, out var selected))
+                Console.WriteLine("  " + kind + ": config " + selected.Variant.Id +
+                    ", net $" + F(selected.Score.Net) +
+                    ", win rate " + F(selected.Score.WinRate) +
+                    "%, drawdown $" + F(selected.Score.Drawdown) +
+                    ", trades " + selected.Score.Trades +
+                    ", settings: " + selected.Variant.Parameters);
+        Console.WriteLine("Console-only reporting: no CSV or text reports created; existing files are untouched.");
         return 0;
     }
+
+    internal sealed record WeeklyOosRow(
+        DateOnly WeekStart, DateOnly WeekEnd, string Strategy,
+        decimal Net, decimal Cumulative, int Trades);
+
+    internal static IReadOnlyList<WeeklyOosRow> BuildWeeklyOosRows(
+        IReadOnlyDictionary<MultiStrategyKind, List<MultiStrategyTrade>> individualOos,
+        IReadOnlyList<MultiStrategyTrade> selectedPortfolioOos,
+        DateOnly firstTestDay, DateOnly lastTestDay)
+    {
+        if (lastTestDay < firstTestDay)
+            throw new ArgumentOutOfRangeException(nameof(lastTestDay));
+        var rows = new List<WeeklyOosRow>();
+        var firstMonday = MondayOf(firstTestDay);
+        var lastMonday = MondayOf(lastTestDay);
+
+        void Append(string name, IEnumerable<MultiStrategyTrade> trades)
+        {
+            var totals = trades
+                .Where(t => t.Day >= firstTestDay && t.Day <= lastTestDay)
+                .GroupBy(t => MondayOf(t.Day))
+                .ToDictionary(g => g.Key,
+                    g => (Net: g.Sum(t => t.Net), Trades: g.Count()));
+            decimal cumulative = 0m;
+            for (var week = firstMonday; week <= lastMonday; week = week.AddDays(7))
+            {
+                totals.TryGetValue(week, out var value);
+                cumulative += value.Net;
+                rows.Add(new WeeklyOosRow(week, week.AddDays(6),
+                    name, value.Net, cumulative, value.Trades));
+            }
+        }
+
+        foreach (var kind in Enum.GetValues<MultiStrategyKind>())
+            Append(kind.ToString(), individualOos[kind]);
+        Append("SelectedPortfolio", selectedPortfolioOos);
+        return rows;
+    }
+
+    private static DateOnly MondayOf(DateOnly date) =>
+        date.AddDays(-(((int)date.DayOfWeek + 6) % 7));
 
     // With >=60 validated sessions, use five expanding-window tests following
     // the first 40% of the dates. Every subsequent day appears in exactly one

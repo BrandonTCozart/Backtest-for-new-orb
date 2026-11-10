@@ -14,9 +14,21 @@ public sealed record SqlMarketDataSet(List<PriceBar> ActiveBars, List<PriceBar> 
 
 public static class SqlMarketDataLoader
 {
+    // SQL identifiers cannot be parameterized. Accept only these known tables
+    // to prevent accidental writes or unsafe identifier interpolation.
+    internal static string ValidateTableName(string tableName) =>
+        tableName switch
+        {
+            "MES_DATA" => "MES_DATA",
+            "MES_DATA_2020_2025" => "MES_DATA_2020_2025",
+            _ => throw new ArgumentException(
+                "SQL source must be MES_DATA or MES_DATA_2020_2025.", nameof(tableName))
+        };
+
     public static async Task<SqlMarketDataSet> LoadAsync(
         string? connectionString, string symbol, string timestampTimeZone,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string tableName = "MES_DATA")
     {
         if (string.IsNullOrWhiteSpace(connectionString))
             throw new InvalidOperationException(
@@ -29,12 +41,13 @@ public static class SqlMarketDataLoader
             throw new ArgumentException(
                 "MarketData:TimestampTimeZone must be America/New_York or UTC.");
 
+        tableName = ValidateTableName(tableName);
         symbol = symbol.Trim();
         // Same table and source columns as orb-analysis. Include the *actual*
         // per-row symbol rather than assuming that SQL symbol equals "MES".
-        const string sql = """
+        var sql = $"""
             SELECT ts_event, symbol, [open], high, low, [close], volume
-            FROM dbo.MES_DATA
+            FROM dbo.[{tableName}]
             WHERE (@symbol = '' OR symbol = @symbol)
             ORDER BY ts_event, symbol;
             """;
@@ -73,11 +86,11 @@ public static class SqlMarketDataLoader
                 if (!long.TryParse(volumeText, NumberStyles.Integer,
                         CultureInfo.InvariantCulture, out var volume))
                     throw new FormatException(
-                        $"Non-integer MES_DATA volume at {raw:yyyy-MM-dd HH:mm:ss}: {volumeText}");
+                        $"Non-integer {tableName} volume at {raw:yyyy-MM-dd HH:mm:ss}: {volumeText}");
                 if (high < low || high < open || high < close ||
                     low > open || low > close)
                     throw new FormatException(
-                        $"Invalid MES_DATA OHLC at {raw:yyyy-MM-dd HH:mm:ss}.");
+                        $"Invalid {tableName} OHLC at {raw:yyyy-MM-dd HH:mm:ss}.");
 
                 var candle = new Candle
                 {
@@ -104,9 +117,9 @@ public static class SqlMarketDataLoader
         if (result.Count == 0)
         {
             // The mislabeled MES_DATA table contains contract-specific ES symbols.
-            const string listSql = """
+            var listSql = $"""
                 SELECT TOP (20) symbol, COUNT_BIG(*) AS candle_count
-                FROM dbo.MES_DATA
+                FROM dbo.[{tableName}]
                 GROUP BY symbol
                 ORDER BY candle_count DESC, symbol;
                 """;
@@ -117,7 +130,7 @@ public static class SqlMarketDataLoader
                 available.Add($"'{(reader.IsDBNull(0) ? "(NULL)" : reader.GetString(0))}' ({reader.GetInt64(1):N0} bars)");
 
             throw new InvalidOperationException(
-                $"dbo.MES_DATA has no candles for symbol '{symbol}'. " +
+                $"dbo.{tableName} has no candles for symbol '{symbol}'. " +
                 "Available database symbols: " +
                 (available.Count == 0 ? "(table empty)" : string.Join(", ", available)) +
                 ". Set MarketData:Symbol to an exact value, or set it to an empty string " +
@@ -169,7 +182,7 @@ public static class SqlMarketDataLoader
             {
                 if (lastMinute is { } previous && bar.T <= previous)
                     throw new FormatException(
-                        $"Duplicate or non-increasing MES_DATA minute for symbol " +
+                        $"Duplicate or non-increasing {tableName} minute for symbol " +
                         $"'{winner.Name}' at {bar.T:O}; check SQL table for duplicates.");
                 result.Add(bar);
                 lastMinute = bar.T;

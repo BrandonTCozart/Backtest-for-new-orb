@@ -270,7 +270,7 @@ public static class MultiStrategyRunner
             }
             var minTrades = Math.Max(6, (fold.TrainingSessions + 5) / 6);
             var admissible = ranked.Where(x => x.Training.Score.Trades >= minTrades).ToArray();
-            var chosenPolicy = (admissible.Length == 0 ? ranked : admissible)
+            var chosenPolicy = (admissible.Length == 0 ? ranked.ToArray() : admissible)
                 .OrderByDescending(x => x.Robustness)
                 .ThenByDescending(x => x.Training.Score.Net)
                 .ThenBy(x => x.Training.Score.Drawdown)

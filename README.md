@@ -68,12 +68,13 @@ With `Backtest:Mode=HistoricalReplay` and `Backtest:SearchProfile=Deep`, the pro
 1. Reads `dbo.MES_DATA` (the recent 2025–2026 candles), reconstructs **training-only robustness rankings** for the **19 pinned configurations actually selected in the last (fifth) MES_DATA walk-forward fold**, and retains only those scores and configuration settings.
 2. Reads `dbo.MES_DATA_2020_2025` from the **same SQL database/connection**, validates completed sessions and active ES contract rollovers, and simulates **only the frozen 19 configurations** on those older candles. It never searches, selects, or changes a strategy using historical replay profits.
 3. Replays the final-fold portfolio policy **`Fixed_best_per_session` with no fallback**, using recent-data training ranks to choose the overnight, morning and afternoon strategies, while separately comparing the identical frozen rankings with fallback enabled.
-4. Prints a terminal-only `REPLAY_TOTAL` table for all 19 strategies, selected portfolio and fallback portfolio: full replay P&L, **clean non-overlap P&L before October 6, 2025**, overlap-period P&L, trade count, win rate and closed-trade max drawdown. Prints a `REPLAY_ROUTER` comparison and graph-ready **`WEEKLY_REPLAY` Monday–Sunday rows** with weekly net, cumulative P&L and trade counts, including zero-trade weeks. **No CSV or text files are created.**
+4. Prints a terminal-only `REPLAY_TOTAL` table for all 19 strategies, selected portfolio and fallback portfolio: full replay P&L, **clean non-overlap P&L before October 6, 2025**, overlap-period P&L, trade count, win rate and closed-trade max drawdown. Prints a `REPLAY_ROUTER` comparison, `YEARLY_REPLAY` annual P&L rows, and graph-ready **`WEEKLY_REPLAY` Monday–Sunday rows** with weekly net, cumulative P&L and trade counts, including zero-trade weeks. **No CSV or text files are created.**
 
 The pinned final-fold IDs are saved in `Backtesting/HistoricalReplayRunner.cs` and correspond to the most recently provided 2025–2026 run, e.g. `MorningMomentum=24958`, `MorningLiquiditySweep=72471`, and `Orb=16184`. The program checks that each ID still resolves to the correct Deep-grid strategy family; if the parameter grid later changes, update the pinned IDs from a fresh recent-period walk-forward output.
 
 ```text
 REPLAY_TOTAL,strategy,total_net_usd,clean_pretraining_net_usd,overlap_net_usd,trades,win_rate_pct,max_closed_trade_drawdown_usd
+YEARLY_REPLAY,year,strategy,net_usd,trades,win_rate_pct
 WEEKLY_REPLAY,week_start_et,week_end_et,strategy,net_usd,cumulative_net_usd,trades
 ```
 

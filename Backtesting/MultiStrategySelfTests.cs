@@ -210,6 +210,9 @@ public static class MultiStrategySelfTests
                    frozen.Choices.All(x =>
                        x.Value.Variant.Id == HistoricalReplayRunner.PinnedIds[x.Key]),
                 "Replay must resolve every pinned Deep-grid fold winner unchanged.");
+            Console.WriteLine("PINNED_EVENT_RULES: " + string.Join(", ",
+                frozen.Choices.OrderBy(x => x.Key)
+                    .Select(x => x.Key + "=" + x.Value.Variant.EventRule)));
             var summaryWriter = Console.Out;
             using var historyCaptured = new StringWriter();
             try

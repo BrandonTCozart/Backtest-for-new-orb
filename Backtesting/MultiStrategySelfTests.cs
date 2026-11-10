@@ -111,6 +111,8 @@ public static class MultiStrategySelfTests
                     "Morning and overnight trades must be independent of later RTH bars.");
             }
 
+            TestPriceActionSignals(date, folder);
+
             var start = MarketTime.ToUtc(date, new TimeOnly(11, 0));
             var win = new MultiStrategyTrade(date, MultiStrategyKind.MorningMomentum, 1,
                 "ESU6", TradeDirection.Long, start, start.AddMinutes(1),
@@ -195,6 +197,153 @@ public static class MultiStrategySelfTests
         {
             if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
         }
+    }
+
+    // Every new family must actually produce a signal on a deterministic
+    // 1-minute fixture in BOTH regular-session slots. Also validates that
+    // a later extreme does not repaint earlier levels or Fibonacci pivots.
+    private static void TestPriceActionSignals(DateOnly date, string folder)
+    {
+        var pairs = new (MultiStrategyKind Morning, MultiStrategyKind Afternoon)[] {
+            (MultiStrategyKind.MorningSupportResistanceBounce, MultiStrategyKind.AfternoonSupportResistanceBounce),
+            (MultiStrategyKind.MorningSupportResistanceBreakout, MultiStrategyKind.AfternoonSupportResistanceBreakout),
+            (MultiStrategyKind.MorningBreakoutRetest, MultiStrategyKind.AfternoonBreakoutRetest),
+            (MultiStrategyKind.MorningFibonacciRetracement, MultiStrategyKind.AfternoonFibonacciRetracement),
+            (MultiStrategyKind.MorningFibonacciExtension, MultiStrategyKind.AfternoonFibonacciExtension),
+            (MultiStrategyKind.MorningLiquiditySweep, MultiStrategyKind.AfternoonLiquiditySweep)
+        };
+
+        foreach (var pair in pairs)
+        foreach (var kind in new[] { pair.Morning, pair.Afternoon })
+        {
+            var afternoon = kind == pair.Afternoon;
+            var signalIndex = afternoon ? 250 : 75;
+            var start = MarketTime.ToUtc(date, new TimeOnly(9, 30));
+            var raw = CreateFullSession(date).Select(b =>
+            {
+                var i = (int)(b.T - start).TotalMinutes;
+                if (i < 0 || i >= 390) return b;
+                decimal open = 100m, close = 100m, high = 100.25m, low = 99.75m;
+                var family = Array.FindIndex(pairs, p =>
+                    p.Morning == kind || p.Afternoon == kind);
+
+                if (family == 2)
+                {
+                    if (i == signalIndex - 5)
+                    {
+                        open = 100m; close = 101m;
+                        high = 101.25m;
+                    }
+                    if (i > signalIndex - 5 && i < signalIndex)
+                    {
+                        open = close = 101m;
+                        high = 101.25m; low = 100.75m;
+                    }
+                    if (i == signalIndex)
+                    {
+                        open = 100.75m; close = 101m;
+                        high = 101.25m; low = 100.25m;
+                    }
+                }
+                else if (family == 3 || family == 4)
+                {
+                    if (i == signalIndex - 25) low = 95m;
+                    if (i == signalIndex - 10) high = 105m;
+                    if (i == signalIndex)
+                    {
+                        if (family == 3)
+                        {
+                            open = 99.5m; close = 100.5m;
+                            high = 101m; low = 99.5m;
+                        }
+                        else
+                        {
+                            open = 105m; close = 106m;
+                            high = 106.25m; low = 104.75m;
+                        }
+                    }
+                }
+                else if (i == signalIndex)
+                {
+                    if (family == 0)
+                    {
+                        open = 99.75m; close = 100.5m;
+                        high = 100.75m;
+                    }
+                    else if (family == 1)
+                    {
+                        open = 100m; close = 101m;
+                        high = 101.25m;
+                    }
+                    else if (family == 5)
+                    {
+                        open = 99.75m; close = 100.5m;
+                        high = 100.75m; low = 99m;
+                    }
+                }
+                return b with { C = new Candle {
+                    T = b.T, O = open, H = high, L = low,
+                    C = close, V = 100
+                } };
+            }).ToList();
+
+            var session = MultiStrategyData.Build(raw, raw, folder).Single();
+            var familyIndex = Array.FindIndex(pairs, p =>
+                p.Morning == kind || p.Afternoon == kind);
+            var ratio = familyIndex == 4 ? 1.272m : 0.5m;
+            var variant = new MultiStrategyVariant(50000 + (int)kind, kind,
+                30, 0.25m, 1m, 1.5m, 0m, 0, 0m,
+                EconomicEventRule.Off,
+                LevelSource: familyIndex is 3 or 4
+                    ? PriceLevelSource.Rolling : PriceLevelSource.OpeningRange,
+                FibRatio: ratio, RetestBars: 8);
+            var signal = PriceActionSignals.Find(variant, session);
+            Ensure(signal is { Index: var idx, Side: TradeDirection.Long } &&
+                   idx == signalIndex,
+                kind + " must produce a causal long signal at fixture bar " +
+                signalIndex + " (got " + signal + ").");
+            var executed = MultiStrategyEngine.GenerateDay(variant, session);
+            Ensure(executed is not null &&
+                   executed.EntryAt == session.Rth[signalIndex + 1].T,
+                kind + " must enter only at the next bar's open.");
+            Ensure(executed!.InitialRiskDollars <= 600m,
+                kind + " must respect the bracket risk cap.");
+
+            // A dramatic spike AFTER the chosen signal must not change it.
+            var postSignalBar = raw.FindIndex(b =>
+                b.T == session.Rth[signalIndex + 25].T);
+            var original = raw[postSignalBar];
+            var changed = raw.ToList();
+            changed[postSignalBar] = original with { C = new Candle {
+                T = original.T, O = original.C.O,
+                H = original.C.H + 150m, L = original.C.L,
+                C = original.C.C, V = original.C.V
+            } };
+            var future = MultiStrategyData.Build(changed, changed, folder).Single();
+            Ensure(Equals(signal, PriceActionSignals.Find(variant, future)),
+                kind + " must not use any post-signal high in its entry logic.");
+        }
+
+        var first = CreateFullSession(date);
+        var nextDay = CreateFullSession(date.AddDays(1));
+        var both = first.Concat(nextDay).ToList();
+        var past = MultiStrategyData.Build(both, both, folder).Last();
+        Ensure(past.PriorCompleteRthDate == date &&
+               past.PriorCompleteRthHigh ==
+                   first.Where(b => MarketTime.ToEastern(b.T).TimeOfDay >=
+                       new TimeSpan(9, 30, 0) &&
+                       MarketTime.ToEastern(b.T).TimeOfDay <
+                       new TimeSpan(16, 0, 0)).Max(b => b.C.H),
+            "Prior completed RTH reference must be based on previous day's actual bars.");
+
+        var rolled = first.Concat(nextDay.Select(b =>
+            b with { Contract = "ESZ6" })).ToList();
+        var onRollover = MultiStrategyData.Build(rolled, rolled, folder).Last();
+        Ensure(onRollover.PriorCompleteRthHigh is null,
+            "Support/resistance references must not cross contract rollovers.");
+
+        Console.WriteLine("PASS: 12 price-action family/session signal fixtures, causal Fibonacci targets,");
+        Console.WriteLine("      next-open execution, future-bar invariance, and rollover-safe RTH levels.");
     }
 
     private static void Ensure(bool condition, string failure)

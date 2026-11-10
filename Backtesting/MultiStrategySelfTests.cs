@@ -53,8 +53,8 @@ public static class MultiStrategySelfTests
 
             var variants = MultiStrategyEngine.EnumerateVariants(MultiSearchProfile.Smoke);
             Ensure(variants.Count == variants.Select(x => x.Id).Distinct().Count() &&
-                   variants.Count == 416,
-                "Smoke grid must contain 416 unique variants.");
+                   variants.Count == 440,
+                "Smoke grid must contain 440 unique variants.");
             var deepFolds = MultiStrategyRunner.CreateResearchFolds(249);
             Ensure(deepFolds.Length == 5 &&
                    deepFolds[0].TrainingEnd == 99 &&
@@ -68,14 +68,15 @@ public static class MultiStrategySelfTests
                     "Five forward test blocks must be contiguous, nonoverlapping and chronological.");
             var deepVariants = MultiStrategyEngine.EnumerateVariants(MultiSearchProfile.Deep);
             Ensure(deepVariants.Count == deepVariants.Select(x => x.Id).Distinct().Count() &&
-                   deepVariants.Count == 60160,
-                "Deep grid must contain 60,160 unique reviewed configurations.");
+                   deepVariants.Count == 74560,
+                "Deep grid must contain 74,560 unique reviewed configurations.");
             Ensure(Enum.GetValues<MultiStrategyKind>().All(k =>
                 deepVariants.Any(v => v.Kind == k)),
                 "Deep grid must cover all seven strategy families.");
-            Ensure(Enum.GetValues<MultiStrategyKind>().All(
-                k => variants.Any(v => v.Kind == k)),
-                "Every intended strategy must have candidate configurations.");
+            Ensure(Enum.GetValues<MultiStrategyKind>().Length == 19 &&
+                   Enum.GetValues<MultiStrategyKind>().All(
+                       k => variants.Any(v => v.Kind == k)),
+                "All 19 price-action and legacy strategy families need smoke candidates.");
 
             foreach (var variant in variants.Where(v => v.Kind != MultiStrategyKind.Orb))
             {
@@ -182,7 +183,7 @@ public static class MultiStrategySelfTests
             Console.WriteLine("PASS: full 25-session synthetic walk-forward and all report outputs.");
             Console.WriteLine("PASS: synthetic full/missing RTH and overnight minute coverage,");
             Console.WriteLine("      lookahead boundary checks, trade risk/close-time invariants,");
-            Console.WriteLine("      seven strategy candidate families, P&L and event-calendar checks.");
+            Console.WriteLine("      nineteen strategy candidate families, P&L and event-calendar checks.");
             return 0;
         }
         catch (Exception error)

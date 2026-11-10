@@ -33,6 +33,10 @@ try
     Console.WriteLine($"SQL active ES candles loaded: {bars.Count:N0}");
     Console.WriteLine($"SQL candle range (UTC): {bars[0].T:O} to {bars[^1].T:O}");
 
+    var profileText = configuration["Backtest:SearchProfile"] ?? "Deep";
+    if (!Enum.TryParse<MultiSearchProfile>(profileText, true, out var searchProfile))
+        throw new ArgumentException(
+            "Backtest:SearchProfile must be Deep or Smoke (Deep is the full search).");
     var mode = (configuration["Backtest:Mode"] ?? "Multi")
         .Trim().ToLowerInvariant();
     Console.WriteLine("Backtest mode: " + mode +
@@ -40,14 +44,14 @@ try
     switch (mode)
     {
         case "multi":
-            return MultiStrategyRunner.Run(bars, marketData.AllContractBars, root);
+            return MultiStrategyRunner.Run(bars, marketData.AllContractBars, root, searchProfile);
         case "orb":
             return WalkForwardRunner.Run(bars, marketData.AllContractBars);
         case "both":
         {
             // New cross-strategy result is saved before the longer full ORB grid.
             var multiExit = MultiStrategyRunner.Run(
-                bars, marketData.AllContractBars, root);
+                bars, marketData.AllContractBars, root, searchProfile);
             if (multiExit != 0) return multiExit;
             return WalkForwardRunner.Run(bars, marketData.AllContractBars);
         }

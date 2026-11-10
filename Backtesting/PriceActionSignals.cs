@@ -191,14 +191,13 @@ public static class PriceActionSignals
         return v.LevelSource switch
         {
             PriceLevelSource.OpeningRange when index >= 15 =>
-                (s.Rth.Take(15).Min(x => x.C.L),
-                 s.Rth.Take(15).Max(x => x.C.H)),
+                (s.OpeningLow, s.OpeningHigh),
             PriceLevelSource.PreviousCompleteRth
                 when s.PriorCompleteRthLow is decimal low &&
                      s.PriorCompleteRthHigh is decimal high =>
                 (low, high),
-            PriceLevelSource.Overnight when s.Overnight is { Length: 930 } night =>
-                (night.Min(x => x.C.L), night.Max(x => x.C.H)),
+            PriceLevelSource.Overnight when s.OvernightLow is decimal onLow &&
+                s.OvernightHigh is decimal onHigh => (onLow, onHigh),
             PriceLevelSource.Rolling when index >= v.Lookback =>
                 (s.Rth.Skip(index - v.Lookback).Take(v.Lookback).Min(x => x.C.L),
                  s.Rth.Skip(index - v.Lookback).Take(v.Lookback).Max(x => x.C.H)),

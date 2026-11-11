@@ -22,10 +22,24 @@ public static class MultiStrategyEngine
     private static SignalKey? CurrentRecipe;
     private static readonly Dictionary<DateOnly, Signal?> SignalCache = new();
 
+    // Entry and exit simulation is invariant to weekday and economic-event
+    // exclusions. Most Deep candidates differ only by those filters, so avoid
+    // resimulating their identical minute-by-minute price paths.
+    private readonly record struct ExitKey(
+        decimal StopAtr, decimal RewardRisk, MultiExitMode Mode,
+        decimal ActivateR, decimal DistanceAtr, bool BreakEven, int LevelLookback);
+    private const int MaxCachedExitsPerEntryRecipe = 40;
+    private static readonly Dictionary<ExitKey, Dictionary<DateOnly, MultiStrategyTrade>>
+        ExitCache = new();
+    private static readonly Queue<ExitKey> ExitCacheOrder = new();
+    internal static int CachedExitRecipeCount => ExitCache.Count;
+
     public static void ClearCaches()
     {
         CurrentRecipe = null;
         SignalCache.Clear();
+        ExitCache.Clear();
+        ExitCacheOrder.Clear();
     }
 
     public static IReadOnlyList<MultiStrategyVariant> EnumerateVariants(
@@ -119,21 +133,52 @@ public static class MultiStrategyEngine
         if (CurrentRecipe != recipe)
         {
             SignalCache.Clear();
+            ExitCache.Clear();
+            ExitCacheOrder.Clear();
             CurrentRecipe = recipe;
         }
+
+        var key = new ExitKey(variant.StopAtrMultiple, variant.RewardRisk,
+            variant.ExitMode, variant.TrailActivationR, variant.TrailAtrMultiple,
+            variant.TrailBreakeven, variant.TargetLookbackBars);
+        if (!ExitCache.TryGetValue(key, out var rawTrades))
+        {
+            rawTrades = new Dictionary<DateOnly, MultiStrategyTrade>();
+            foreach (var s in sessions)
+            {
+                if (!SignalCache.TryGetValue(s.Day, out var signal))
+                {
+                    signal = FindSignal(variant, s);
+                    SignalCache.Add(s.Day, signal);
+                }
+                var trade = MakeTrade(variant, s, signal);
+                if (trade is not null)
+                    rawTrades.Add(s.Day, trade);
+            }
+
+            // Cache only a bounded set of exit variants for this entry recipe.
+            // FIFO eviction prevents thousands of simulated configurations from
+            // accumulating in memory during the 587,520-candidate search.
+            if (ExitCache.Count >= MaxCachedExitsPerEntryRecipe)
+            {
+                var oldest = ExitCacheOrder.Dequeue();
+                ExitCache.Remove(oldest);
+            }
+            ExitCache.Add(key, rawTrades);
+            ExitCacheOrder.Enqueue(key);
+        }
+
         foreach (var s in sessions)
         {
             if (!WeekdaySelection.Includes(variant.WeekdayMask, s.Day.DayOfWeek))
                 continue;
-            if (!SignalCache.TryGetValue(s.Day, out var signal))
-            {
-                signal = FindSignal(variant, s);
-                SignalCache.Add(s.Day, signal);
-            }
-            var trade = MakeTrade(variant, s, signal);
-            if (trade is not null &&
-                EconomicCalendar.AllowsEntry(variant.EventRule, s.Day, trade.EntryAt))
-                result.Add(s.Day, trade);
+            if (!rawTrades.TryGetValue(s.Day, out var trade) ||
+                !EconomicCalendar.AllowsEntry(variant.EventRule, s.Day, trade.EntryAt))
+                continue;
+            // The entry/exit price path is shared, but every winning candidate
+            // must retain its own unique variant ID for the frozen replay.
+            result.Add(s.Day, trade.VariantId == variant.Id
+                ? trade : trade with { VariantId = variant.Id });
         }
         return result;
     }

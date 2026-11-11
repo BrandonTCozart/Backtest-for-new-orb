@@ -126,6 +126,7 @@ public static class MultiStrategySelfTests
 
             TestTrailingStops(session);
             TestNewExitModes(session);
+            TestFastScoringAndExitReuse(session);
             TestPriceActionSignals(date, folder);
             TestFallbackRouting(date, session, variants);
 
@@ -475,6 +476,81 @@ public static class MultiStrategySelfTests
         Ensure(Trade(breakEven) is { ExitReason: "trailing_stop", Exit: 100m },
             "Break-even stop must activate after 1R and fill conservatively on a gap.");
         Console.WriteLine("PASS: structural level no-lookahead, hybrid, staged, break-even exits.");
+    }
+
+    private static void TestFastScoringAndExitReuse(MultiSession session)
+    {
+        // Preserve each fold's exact trade-count, net, win-rate, profit-factor
+        // and path-dependent drawdown, including empty and losing subranges.
+        var days = Enumerable.Range(0, 85)
+            .Select(i => new DateOnly(2026, 1, 5).AddDays(i)).ToArray();
+        var trades = new Dictionary<DateOnly, MultiStrategyTrade>();
+        for (var i = 0; i < days.Length; i++)
+        {
+            if (i % 4 == 0) continue;
+            var entry = MarketTime.ToUtc(days[i], new TimeOnly(9, 45));
+            var outcome = ((i * 7) % 13 - 6) * 0.25m;
+            trades.Add(days[i], new MultiStrategyTrade(days[i],
+                MultiStrategyKind.MorningMomentum, 4242, "ESH6",
+                TradeDirection.Long, entry, entry.AddMinutes(4),
+                5000m, 5000m + outcome, 250m, "synthetic"));
+        }
+        var folds = MultiStrategyRunner.CreateResearchFolds(days.Length);
+        var (full, fast) = MultiStrategyRunner.ScoreCandidateRanges(trades, days, folds);
+        Ensure(full == MultiScore.From(trades.Values),
+            "Fast all-history scoring must exactly match chronological MultiScore.");
+        for (var f = 0; f < folds.Length; f++)
+        {
+            var fold = folds[f];
+            var mid = fold.TrainingStart + fold.TrainingSessions / 2;
+            MultiScore Old(int from, int to) =>
+                MultiScore.From(days.Skip(from).Take(to - from)
+                    .Where(trades.ContainsKey).Select(day => trades[day]));
+            Ensure(fast[f].Train == Old(fold.TrainingStart, fold.TrainingEnd) &&
+                   fast[f].Early == Old(fold.TrainingStart, mid) &&
+                   fast[f].Late == Old(mid, fold.TrainingEnd),
+                "Single-pass fold scores must match the original three scans.");
+        }
+
+        var entryRecipe = new MultiStrategyVariant(99531,
+            MultiStrategyKind.MorningMomentum, 10, 0m,
+            1m, 2m, 1.25m, 0, 0m, EconomicEventRule.Off);
+        var changedFilter = entryRecipe with {
+            Id = 99532, EventRule = EconomicEventRule.AvoidMajorReleaseDay
+        };
+        var sample = new[] { session };
+        MultiStrategyEngine.ClearCaches();
+        var baseline = MultiStrategyEngine.Generate(entryRecipe, sample,
+            Array.Empty<SessionData>());
+        Ensure(MultiStrategyEngine.CachedExitRecipeCount == 1,
+            "Initial entry/exit recipe must be cached.");
+        var filtered = MultiStrategyEngine.Generate(changedFilter, sample,
+            Array.Empty<SessionData>());
+        Ensure(MultiStrategyEngine.CachedExitRecipeCount == 1,
+            "Changing economic-event policy must reuse the same exit simulation.");
+        foreach (var candidate in baseline.Values)
+        {
+            if (!EconomicCalendar.AllowsEntry(changedFilter.EventRule,
+                    candidate.Day, candidate.EntryAt))
+                continue;
+            Ensure(filtered.TryGetValue(candidate.Day, out var revised) &&
+                   revised == (candidate with { VariantId = changedFilter.Id }),
+                "Cached results must retain the same fills but correct candidate ID.");
+        }
+        Ensure(baseline.Count == 0 || filtered.Count <= baseline.Count,
+            "An economic exclusion cannot add new trades.");
+        var otherExit = changedFilter with {
+            Id = 99533, ExitMode = MultiExitMode.TrailingStop,
+            RewardRisk = 0m, TrailActivationR = 1m, TrailAtrMultiple = 1m
+        };
+        _ = MultiStrategyEngine.Generate(otherExit, sample,
+            Array.Empty<SessionData>());
+        Ensure(MultiStrategyEngine.CachedExitRecipeCount == 2,
+            "Different exit settings must not share cached simulated fills.");
+        MultiStrategyEngine.ClearCaches();
+        Ensure(MultiStrategyEngine.CachedExitRecipeCount == 0,
+            "Cache clearing must isolate distinct datasets and replay periods.");
+        Console.WriteLine("PASS: single-pass fold scores and bounded exit-recipe reuse.");
     }
 
     private static void TestFallbackRouting(

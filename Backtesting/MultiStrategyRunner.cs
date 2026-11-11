@@ -98,6 +98,7 @@ public static class MultiStrategyRunner
             .Where(x => x.Range is not null && days.Contains(x.Day))
             .OrderBy(x => x.Day).ToArray();
         var folds = CreateResearchFolds(sessions.Count);
+        var sessionDays = sessions.Select(s => s.Day).ToArray();
         var variants = MultiStrategyEngine.EnumerateVariants(profile);
         var kinds = Enum.GetValues<MultiStrategyKind>();
         var countByKind = variants.GroupBy(v => v.Kind)
@@ -129,7 +130,10 @@ public static class MultiStrategyRunner
                 // Stream ONE candidate at a time; outcomes for losing candidates
                 // are discarded rather than retaining millions of trades.
                 var trades = MultiStrategyEngine.Generate(variant, sessions, originalOrb);
-                var full = ScoreRange(trades, sessions, 0, sessions.Count);
+                // One chronological scoring pass computes all fold halves, full
+                // training windows and overall metrics. This avoids 16 scans,
+                // allocations and trade sorts per candidate.
+                var (full, foldScores) = ScoreCandidateRanges(trades, sessionDays, folds);
                 var fullQualifies = full.Trades >= minimumFull;
                 if (fullQualifies)
                 {
@@ -146,10 +150,9 @@ public static class MultiStrategyRunner
                 for (var f = 0; f < folds.Length; f++)
                 {
                     var fold = folds[f];
-                    var mid = fold.TrainingStart + fold.TrainingSessions / 2;
-                    var early = ScoreRange(trades, sessions, fold.TrainingStart, mid);
-                    var late = ScoreRange(trades, sessions, mid, fold.TrainingEnd);
-                    var train = ScoreRange(trades, sessions, fold.TrainingStart, fold.TrainingEnd);
+                    var early = foldScores[f].Early;
+                    var late = foldScores[f].Late;
+                    var train = foldScores[f].Train;
                     var minimum = Math.Max(6, (fold.TrainingSessions + 5) / 6);
                     var qualifies = train.Trades >= minimum &&
                                     early.Trades >= Math.Max(3, minimum / 4) &&
@@ -584,17 +587,58 @@ public static class MultiStrategyRunner
             }).ToArray();
     }
 
-    // All scores derive ONLY from individual trade outcomes on the requested
-    // chronological range. No test-period P&L enters training selection.
-    private static MultiScore ScoreRange(
-        IReadOnlyDictionary<DateOnly, MultiStrategyTrade> trades,
-        IReadOnlyList<MultiSession> sessions, int from, int to)
+    // Same exact aggregation as MultiScore.From, without repeatedly sorting
+    // already chronological, at-most-one-trade-per-day strategy results.
+    // Each candidate is scanned ONCE and each fold's training, early and late
+    // streams gets its own peak/drawdown accumulator.
+    private struct ScoreAccumulator
     {
-        var picked = new List<MultiStrategyTrade>();
-        for (var i = from; i < to; i++)
-            if (trades.TryGetValue(sessions[i].Day, out var item))
-                picked.Add(item);
-        return MultiScore.From(picked);
+        private int _trades, _wins;
+        private decimal _net, _gross, _costs, _peak, _drawdown, _gains, _losses;
+        public void Add(MultiStrategyTrade trade)
+        {
+            ++_trades;
+            var net = trade.Net;
+            _net += net;
+            _gross += trade.Gross;
+            _costs += trade.Costs;
+            if (trade.IsWin) { ++_wins; _gains += net; }
+            else _losses -= net;
+            _peak = Math.Max(_peak, _net);
+            _drawdown = Math.Max(_drawdown, _peak - _net);
+        }
+        public MultiScore Finish() => new(_trades, _wins, _net, _gross, _costs,
+            _drawdown, _losses > 0m ? _gains / _losses : null);
+    }
+
+    internal static (MultiScore Full, (MultiScore Early, MultiScore Late,
+        MultiScore Train)[] Folds) ScoreCandidateRanges(
+        IReadOnlyDictionary<DateOnly, MultiStrategyTrade> trades,
+        IReadOnlyList<DateOnly> sessionDays, IReadOnlyList<WalkForwardFold> folds)
+    {
+        var full = new ScoreAccumulator();
+        var early = new ScoreAccumulator[folds.Count];
+        var late = new ScoreAccumulator[folds.Count];
+        var training = new ScoreAccumulator[folds.Count];
+        var middle = folds.Select(f => f.TrainingStart +
+            f.TrainingSessions / 2).ToArray();
+        for (var i = 0; i < sessionDays.Count; i++)
+        {
+            if (!trades.TryGetValue(sessionDays[i], out var trade)) continue;
+            full.Add(trade);
+            for (var f = 0; f < folds.Count; f++)
+            {
+                var fold = folds[f];
+                if (i < fold.TrainingStart || i >= fold.TrainingEnd) continue;
+                training[f].Add(trade);
+                if (i < middle[f]) early[f].Add(trade);
+                else late[f].Add(trade);
+            }
+        }
+        var scores = new (MultiScore Early, MultiScore Late, MultiScore Train)[folds.Count];
+        for (var f = 0; f < folds.Count; f++)
+            scores[f] = (early[f].Finish(), late[f].Finish(), training[f].Finish());
+        return (full.Finish(), scores);
     }
 
     private static decimal Robustness(MultiScore total, MultiScore first, MultiScore second) =>

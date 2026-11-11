@@ -175,18 +175,10 @@ public static class HistoricalReplayRunner
             "exactly as selected in the latest MES_DATA fold.");
         Console.WriteLine("Frozen config IDs and rankings are calculated exclusively from MES_DATA.");
 
-        var underCalendar = sessions[0].Day < CalendarStart;
-        var needsCalendar = plan.Choices.Values
-            .Where(x => x.Variant.EventRule != EconomicEventRule.Off)
-            .Select(x => x.Variant.Kind.ToString())
-            .OrderBy(x => x).ToArray();
-        if (underCalendar && needsCalendar.Length > 0)
-        {
-            Console.WriteLine("DATA LIMITATION: the embedded macro-announcement schedule starts 2025-10-06.");
-            Console.WriteLine("For earlier dates, event-filtered variants lack historical CPI/FOMC/NFP etc. entries,");
-            Console.WriteLine("so those exclusions cannot work as originally intended. This is NOT an exact");
-            Console.WriteLine("event-filter replay for: " + string.Join(", ", needsCalendar));
-        }
+        ValidateHistoricalReleaseCoverage(sessions[0].Day, sessions[^1].Day);
+        Console.WriteLine("Historical event exclusions use the checked-in 2020-2025 release calendar.");
+        Console.WriteLine("BLS, BEA, Census and Federal Reserve dates come from official archives;");
+        Console.WriteLine("ISM first/third-business-day dates are rule-derived, with exceptions possible.");
         if (sessions[^1].Day >= CalendarStart)
             Console.WriteLine("Overlap note: dates from 2025-10-06 onward overlap the " +
                               "configuration-selection era; clean nonoverlap P&L is reported separately.");
@@ -304,6 +296,39 @@ public static class HistoricalReplayRunner
         Console.WriteLine("Historical replay completed; no files written. " +
                           "Send this terminal output to ChatGPT for charts.");
         return 0;
+    }
+
+    // Fail closed if the generated archive lacks a material class of major
+    // announcements. For a full calendar year, a missing source must never
+    // silently become "trade on every news day".
+    internal static void ValidateHistoricalReleaseCoverage(
+        DateOnly first, DateOnly last)
+    {
+        for (var year = first.Year; year <= last.Year; year++)
+        {
+            if (new DateOnly(year, 1, 1) < first ||
+                new DateOnly(year, 12, 31) > last)
+                continue;
+            if (year < 2020 || year > 2025) continue;
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (var day = new DateOnly(year, 1, 1);
+                 day.Year == year; day = day.AddDays(1))
+                foreach (var item in EconomicCalendar.Events(day))
+                    counts[item.Code] = counts.GetValueOrDefault(item.Code) + 1;
+            var minimums = new Dictionary<string, int> {
+                ["CPI"] = 11, ["NFP"] = 11, ["PPI"] = 11,
+                ["JOLTS"] = 11, ["PCE"] = 10,
+                ["GDP"] = 10, ["RETAIL_SALES"] = 10,
+                ["ISM_MANUFACTURING"] = 11, ["ISM_SERVICES"] = 11,
+                ["FOMC_DECISION"] = 7
+            };
+            foreach (var (code, min) in minimums)
+                if (counts.GetValueOrDefault(code) < min)
+                    throw new InvalidOperationException(
+                        $"Historical economic calendar incomplete for {year} " +
+                        $"({code}: {counts.GetValueOrDefault(code)}, need at least {min}). " +
+                        "Do not rely on the replay until the archived dates are complete.");
+        }
     }
 
     private static string F(decimal amount) => amount.ToString("0.00", Ci);

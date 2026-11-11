@@ -286,7 +286,7 @@ public static class MultiStrategySelfTests
                    fresh.Choices.All(x =>
                        x.Value.Variant.Id == selectedKinds[x.Key].Variant.Id) &&
                    fresh.Choices[MultiStrategyKind.MorningVwapReversion]
-                       .Variant.ExitMode == MultiExitMode.TrailingStop,
+                       .Variant.ExitMode == MultiExitMode.TargetThenTrail,
                 "Combined replay must capture freshly optimized exit settings and router.");
 
             // Regression of frozen historical replay: no SQL, no new fit on

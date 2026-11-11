@@ -57,8 +57,10 @@ def add(date, code, desc, time_et, source, major=True):
     key = (date.isoformat(), code)
     prev = EVENTS.get(key)
     current = (date.isoformat(), time_et, code, desc, source, major)
-    if prev and prev != current:
-        raise RuntimeError(f"Contradictory release: {prev} vs {current}")
+    if prev:
+        if prev[:4] != current[:4] or prev[5] != current[5]:
+            raise RuntimeError(f"Contradictory release: {prev} vs {current}")
+        return  # Same official release indexed under multiple archive products.
     EVENTS[key] = current
 
 date_pattern = re.compile(r"([A-Za-z]+)\s+0?(\d{1,2}),?\s+(20\d{2})")
@@ -150,47 +152,48 @@ def fed():
     print(f"Fed minutes: {minutes}")
 
 def bea():
-    # National GDP and personal income/PCE monthly releases appear in BEA's
-    # published news archive. The national BEA economic release time is 08:30 ET.
-    products = [(721, "PCE"), (451, "GDP")]
-    for product_id, code in products:
-        count = Counter()
-        newest = None
-        for page in range(12):
-            url = (
-                "https://www.bea.gov/news/archive?created_1=All&"
-                f"field_related_product_target_id={product_id}&title=&page={page}"
-            )
-            soup = fetch(url)
-            rows = 0
-            earliest = None
-            for tr in soup.select("tr"):
-                cols = [c.get_text(" ", strip=True) for c in tr.find_all(["td"], recursive=False)]
-                if len(cols) < 2:
-                    continue
-                title, date_text = cols[:2]
-                published = parsedate(date_text)
-                if published is None:
-                    continue
-                rows += 1
-                earliest = min(earliest, published) if earliest else published
-                if code == "PCE":
-                    valid = title.startswith("Personal Income and Outlays,") and (
-                        "Data Update" not in title)
-                    desc = "Personal Income and Outlays / PCE"
-                else:
-                    valid = title.startswith("GDP (") or title.startswith(
-                        "Gross Domestic Product,")
-                    desc = "Gross Domestic Product"
-                if valid:
-                    add(published, code, desc, "08:30", url, True)
-                    count[published.year] += 1
-            if rows == 0:
-                raise RuntimeError(f"BEA archive unexpectedly empty: {url}")
-            if earliest is not None and earliest.year < 2020:
-                break
+    # BEA reorganized product IDs across years; fetch both historical and
+    # newer archive categories so 2023/2024 releases are not dropped.
+    products = [([721, 476], "PCE"), ([451, 456], "GDP")]
+    for product_ids, code in products:
+        for product_id in product_ids:
+            for page in range(12):
+                url = (
+                    "https://www.bea.gov/news/archive?created_1=All&"
+                    f"field_related_product_target_id={product_id}&title=&page={page}"
+                )
+                soup = fetch(url)
+                rows = 0
+                earliest = None
+                for tr in soup.select("tr"):
+                    cols = [c.get_text(" ", strip=True)
+                            for c in tr.find_all(["td"], recursive=False)]
+                    if len(cols) < 2:
+                        continue
+                    title, date_text = cols[:2]
+                    published = parsedate(date_text)
+                    if published is None:
+                        continue
+                    rows += 1
+                    earliest = min(earliest, published) if earliest else published
+                    if code == "PCE":
+                        valid = title.startswith("Personal Income and Outlays,") and (
+                            "Data Update" not in title)
+                        desc = "Personal Income and Outlays / PCE"
+                    else:
+                        valid = title.startswith("GDP (") or title.startswith(
+                            "Gross Domestic Product,")
+                        desc = "Gross Domestic Product"
+                    if valid:
+                        add(published, code, desc, "08:30", url, True)
+                if rows == 0:
+                    raise RuntimeError(f"BEA archive unexpectedly empty: {url}")
+                if earliest is not None and earliest.year < 2020:
+                    break
+        count = Counter(int(date[:4]) for (date, event_code) in EVENTS
+                        if event_code == code)
         for year in range(2021, 2025):
-            if count[year] < (9 if code=="PCE" else 8):
+            if count[year] < (9 if code == "PCE" else 8):
                 raise RuntimeError(f"Missing BEA {code} {year} releases: {dict(count)}")
         print(f"BEA {code}: {dict(count)}")
 

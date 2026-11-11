@@ -167,6 +167,14 @@ public static class EconomicCalendar
     private static readonly Dictionary<DateOnly, EconomicEvent[]> ByDay =
         Scheduled.GroupBy(e => e.Day).ToDictionary(x => x.Key, x => x.ToArray());
 
+    // This rule is evaluated for EVERY candidate/trading day. Searching the
+    // full 2020-2026 schedule each time was O(events) inside a ~588k grid.
+    // Compute the identical previous-trading-day rule once, then O(1) lookup.
+    private static readonly HashSet<DateOnly> BeforeFedDecisionDays = Scheduled
+        .Where(e => e.Code == "FOMC_DECISION")
+        .Select(e => PreviousTradingDay(e.Day))
+        .ToHashSet();
+
     public static IReadOnlyList<EconomicEvent> Events(DateOnly day) =>
         ByDay.TryGetValue(day, out var found) ? found : [];
 
@@ -177,8 +185,7 @@ public static class EconomicCalendar
 
     // Uses day-before calendar relationship rather than future rate policy.
     public static bool IsBeforeFedDecision(DateOnly day) =>
-        Scheduled.Any(e => e.Code == "FOMC_DECISION" &&
-            PreviousTradingDay(e.Day) == day);
+        BeforeFedDecisionDays.Contains(day);
 
     public static int? CalendarDaysUntilNextFedDecision(DateOnly day)
     {

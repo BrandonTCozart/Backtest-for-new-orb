@@ -304,12 +304,12 @@ public static class HistoricalReplayRunner
     internal static void ValidateHistoricalReleaseCoverage(
         DateOnly first, DateOnly last)
     {
-        for (var year = first.Year; year <= last.Year; year++)
+        // Validate every historical calendar year touched by SQL, including
+        // partial 2020 and 2025. The archive is fixed regardless of how many
+        // SQL sessions happen to exist in a given calendar year.
+        for (var year = Math.Max(2020, first.Year);
+             year <= Math.Min(2025, last.Year); year++)
         {
-            if (new DateOnly(year, 1, 1) < first ||
-                new DateOnly(year, 12, 31) > last)
-                continue;
-            if (year < 2020 || year > 2025) continue;
             var counts = new Dictionary<string, int>(StringComparer.Ordinal);
             for (var day = new DateOnly(year, 1, 1);
                  day.Year == year; day = day.AddDays(1))
@@ -320,8 +320,26 @@ public static class HistoricalReplayRunner
                 ["JOLTS"] = 11, ["PCE"] = 10,
                 ["GDP"] = 10, ["RETAIL_SALES"] = 10,
                 ["ISM_MANUFACTURING"] = 11, ["ISM_SERVICES"] = 11,
-                ["FOMC_DECISION"] = 7
+                ["FOMC_DECISION"] = 7, ["FOMC_MINUTES"] = 7
             };
+            if (year == 2020)
+            {
+                // The input SQL begins in September 2020. The archived PCE
+                // file is sparse before then; the 2020 FOMC archive is absent
+                // from the current Fed page, so relevant releases are pinned.
+                minimums["PCE"] = 8;
+                minimums["FOMC_DECISION"] = 3;
+                minimums["FOMC_MINUTES"] = 2;
+            }
+            if (year == 2025)
+            {
+                // Generated archive ends on October 5, before the 2025
+                // shutdown reschedules. Rate decisions through September: 6.
+                foreach (var code in minimums.Keys.ToArray())
+                    minimums[code] = 8;
+                minimums["FOMC_DECISION"] = 6;
+                minimums["FOMC_MINUTES"] = 6;
+            }
             foreach (var (code, min) in minimums)
                 if (counts.GetValueOrDefault(code) < min)
                     throw new InvalidOperationException(

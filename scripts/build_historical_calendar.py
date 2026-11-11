@@ -190,6 +190,34 @@ def bea():
                     raise RuntimeError(f"BEA archive unexpectedly empty: {url}")
                 if earliest is not None and earliest.year < 2020:
                     break
+        if code == "GDP":
+            # BEA's own annual quarterly GDP release schedule tables. The
+            # general archive tags miss some revisions despite a valid release.
+            # Annual dates are checked against the primary BEA schedule.
+            schedules = {
+                2020: ("01-30 02-27 03-26 04-29 05-28 06-25 "
+                       "07-30 08-27 09-30 10-29 11-25 12-22",
+                       "https://www.bea.gov/sites/default/files/2019-12/gdp3q19_3rd.pdf"),
+                2021: ("01-28 02-25 03-25 04-29 05-27 06-24 "
+                       "07-29 08-26 09-30 10-28 11-24 12-22",
+                       "https://www.bea.gov/sites/default/files/2020-11/gdp3q20_2nd_0.pdf"),
+                2022: ("01-27 02-24 03-30 04-28 05-26 06-29 "
+                       "07-28 08-25 09-29 10-27 11-30 12-22",
+                       "https://www.bea.gov/sites/default/files/2021-12/gdp3q21_3rd.pdf"),
+                2023: ("01-26 02-23 03-30 04-27 05-25 06-29 "
+                       "07-27 08-30 09-28 10-26 11-29 12-21",
+                       "https://www.bea.gov/sites/default/files/2023-01/gdp4q22_adv.pdf"),
+                2024: ("01-25 02-28 03-28 04-25 05-30 06-27 "
+                       "07-25 08-29 09-26 10-30 11-27 12-19",
+                       "https://www.bea.gov/sites/default/files/2024-01/gdp4q23-adv.pdf"),
+                2025: ("01-30 02-27 03-27 04-30 05-29 06-26 "
+                       "07-30 08-28 09-25",
+                       "https://www.bea.gov/sites/default/files/2024-12/gdp3q24-3rd.pdf")
+            }
+            for year, (month_days, source) in schedules.items():
+                for md in month_days.split():
+                    add(dt.date.fromisoformat(f"{year}-{md}"), "GDP",
+                        "Gross Domestic Product", "08:30", source, True)
         count = Counter(int(date[:4]) for (date, event_code) in EVENTS
                         if event_code == code)
         for year in range(2021, 2025):

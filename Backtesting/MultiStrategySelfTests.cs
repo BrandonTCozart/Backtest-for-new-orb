@@ -50,8 +50,8 @@ public static class MultiStrategySelfTests
 
             var variants = MultiStrategyEngine.EnumerateVariants(MultiSearchProfile.Smoke);
             Ensure(variants.Count == variants.Select(x => x.Id).Distinct().Count() &&
-                   variants.Count == 1240,
-                "Smoke grid must retain 440 fixed configs plus 800 trailing variations.");
+                   variants.Count == 2040,
+                "Smoke must preserve 440 fixed + 800 old trails and sample each new exit mode.");
             var deepFolds = MultiStrategyRunner.CreateResearchFolds(249);
             Ensure(deepFolds.Length == 5 &&
                    deepFolds[0].TrainingEnd == 99 &&
@@ -65,20 +65,24 @@ public static class MultiStrategySelfTests
                     "Five forward test blocks must be contiguous, nonoverlapping and chronological.");
             var deepVariants = MultiStrategyEngine.EnumerateVariants(MultiSearchProfile.Deep);
             Ensure(deepVariants.Count == deepVariants.Select(x => x.Id).Distinct().Count() &&
-                   deepVariants.Count == 133184,
-                "Deep grid must contain all 74,560 fixed configs plus 58,624 trailing variations.");
+                   deepVariants.Count == 587520,
+                "Deep grid preserves 74,560 fixed and 58,624 legacy trailing IDs plus new exits.");
             Ensure(deepVariants.Take(74560).All(v =>
-                       v.ExitMode == MultiExitMode.FixedTarget) &&
-                   deepVariants.Skip(74560).All(v =>
-                       v.ExitMode == MultiExitMode.TrailingStop &&
-                       v.RewardRisk == 0m &&
-                       v.TrailActivationR is 0.5m or 1m &&
-                       v.TrailAtrMultiple is 0.5m or 1m) &&
-                   Enum.GetValues<MultiStrategyKind>()
-                       .Where(k => k != MultiStrategyKind.Orb)
-                       .All(k => deepVariants.Any(v =>
-                           v.Kind == k && v.ExitMode == MultiExitMode.TrailingStop)),
-                "Every original config ID is stable; all 18 non-ORB families test both exits.");
+                        v.ExitMode == MultiExitMode.FixedTarget) &&
+                    deepVariants.Skip(74560).Take(58624).All(v =>
+                        v.ExitMode == MultiExitMode.TrailingStop &&
+                        v.RewardRisk == 0m &&
+                        v.TrailActivationR is 0.5m or 1m &&
+                        v.TrailAtrMultiple is 0.5m or 1m) &&
+                    Enum.GetValues<MultiStrategyKind>()
+                        .Where(k => k != MultiStrategyKind.Orb)
+                        .All(k => Enum.GetValues<MultiExitMode>().All(exit =>
+                            deepVariants.Any(v => v.Kind == k && v.ExitMode == exit))) &&
+                    deepVariants.Any(v => v.TrailActivationR == 3m) &&
+                    deepVariants.Any(v => v.TrailAtrMultiple == 3m) &&
+                    deepVariants.Any(v => v.TrailBreakeven) &&
+                    deepVariants.Any(v => v.TargetLookbackBars == 60),
+                "Preserve original IDs; cover expanded trails, structure, stages and hybrid exits.");
             Ensure(Enum.GetValues<MultiStrategyKind>().All(k =>
                 deepVariants.Any(v => v.Kind == k)),
                 "Deep grid must cover all seven strategy families.");
@@ -121,6 +125,7 @@ public static class MultiStrategySelfTests
             }
 
             TestTrailingStops(session);
+            TestNewExitModes(session);
             TestPriceActionSignals(date, folder);
             TestFallbackRouting(date, session, variants);
 
@@ -409,6 +414,67 @@ public static class MultiStrategySelfTests
             "Short trailing stops must trail the LOW and only fill on the next bar.");
 
         Console.WriteLine("PASS: fixed target vs early/delayed, wide/tight and short trailing exits.");
+    }
+
+    private static void TestNewExitModes(MultiSession session)
+    {
+        var bars = session.Rth.Select(bar => bar with { C = new Candle {
+            T = bar.T, O = 100m, H = 100.25m, L = 99.75m,
+            C = 100m, V = 100
+        } }).ToArray();
+        void Set(int i, decimal open, decimal high, decimal low, decimal close)
+        {
+            bars[i] = bars[i] with { C = new Candle {
+                T = bars[i].T, O = open, H = high, L = low, C = close, V = 100
+            } };
+        }
+        Set(29, 100m, 101.25m, 99.75m, 100m);
+        Set(31, 100.25m, 102m, 100m, 101.75m);
+        Set(32, 101.75m, 102m, 101.25m, 101.5m);
+        Set(33, 101.5m, 101.75m, 100.75m, 101m);
+        var v = new MultiStrategyVariant(99501,
+            MultiStrategyKind.MorningVwapReversion, 10, 0.5m,
+            1m, 1m, 0m, 0, 0m, EconomicEventRule.Off);
+        MultiStrategyTrade? Trade(MultiStrategyVariant config) =>
+            MultiStrategyEngine.SimulateBracket(config, session, bars, 30, 35,
+                TradeDirection.Long, 1m);
+        var structure = v with {
+            ExitMode = MultiExitMode.StructureTarget, TargetLookbackBars = 20
+        };
+        var level = MultiStrategyEngine.StructuralTarget(
+            structure, session, bars, 30, TradeDirection.Long, 100m, 1m, null);
+        Ensure(level == 101.25m &&
+               Trade(structure) is { ExitReason: "structure_target", Exit: 101.25m },
+            "Structure target must use a past-only actual resistance level.");
+        var changed = bars.ToArray();
+        changed[32] = changed[32] with { C = new Candle {
+            T = changed[32].T, O = 101.75m, H = 150m, L = 90m,
+            C = 101.5m, V = 100
+        } };
+        Ensure(MultiStrategyEngine.StructuralTarget(structure, session, changed,
+            30, TradeDirection.Long, 100m, 1m, null) == level,
+            "Future candles must never repaint a structural target.");
+
+        var hybrid = v with {
+            ExitMode = MultiExitMode.TargetThenTrail, RewardRisk = 1m,
+            TrailActivationR = 1m, TrailAtrMultiple = 0.5m
+        };
+        var staged = v with {
+            ExitMode = MultiExitMode.StagedProfitLock, RewardRisk = 0m,
+            TrailAtrMultiple = 0.5m
+        };
+        Ensure(Trade(hybrid) is { ExitReason: "trailing_stop", Exit: 101.5m } &&
+               Trade(staged) is { ExitReason: "trailing_stop", Exit: 101.5m },
+            "Milestones must activate, not immediately exit, hybrid/staged trails.");
+
+        var breakEven = v with {
+            ExitMode = MultiExitMode.TrailingStop, RewardRisk = 0m,
+            TrailActivationR = 3m, TrailAtrMultiple = 2m,
+            TrailBreakeven = true
+        };
+        Ensure(Trade(breakEven) is { ExitReason: "trailing_stop", Exit: 100m },
+            "Break-even stop must activate after 1R and fill conservatively on a gap.");
+        Console.WriteLine("PASS: structural level no-lookahead, hybrid, staged, break-even exits.");
     }
 
     private static void TestFallbackRouting(

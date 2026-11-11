@@ -14,7 +14,7 @@ Set `Backtest:Mode` in `appsettings.json` or a local override:
 | `Orb` | Original exhaustive 2,571,264-configuration ORB optimizer and its separate walk-forward reports |
 | `Both` | Run multi-strategy first, then the original exhaustive ORB optimizer |
 
-The **Deep** multi-strategy search in `ResearchThenHistorical` and `Multi` evaluates **133,184 configurations across 19 separately ranked strategy families**: all **74,560 unchanged original fixed-exit configurations** (including 20,736 staged ORB variants) plus **58,624 non-ORB trailing-stop variants**. Trailing variants test the same entry/stop recipes with two activation thresholds and two trail distances. Original variant IDs remain stable so the legacy pinned historical-replay mode is reproducible. The independent exhaustive ORB search is still available under `Orb` or `Both` mode. Deep varies entry windows, confirmation, VWAP filters, breakout buffers, RSI extremes, relative volume, ATR stops, reward/risk targets, weekday restrictions, retests and economic-event rules. The lighter `Smoke` profile (1,240 candidates including trailing checks) is for quick regression/development tests only.
+The **Deep** multi-strategy search in `ResearchThenHistorical` and `Multi` evaluates **587,520 configurations across 19 separately ranked strategy families**. All **74,560** original fixed-target IDs and **58,624** original trailing-stop IDs are preserved. For every non-ORB family it compares fixed reward/risk targets, completed historical support/resistance levels, expanded ATR trails, ORB-inspired staged profit locks, and target-activated trailing stops. ORB retains its own native staged system. Deep varies entry filters and signal/stop/risk variants as before. The lighter `Smoke` profile (2,040 candidates) covers every exit mode and is for quick regression tests only. Deep is roughly **4.4 times larger** than before, so expect substantially longer runs.
 
 Set `Backtest:SearchProfile` to `Deep` (default) for the entire parameter grid or `Smoke` for a clearly labeled development subset. The combined mode uses the selected profile in its first phase and DOES NOT optimize on older SQL data. Deep has no automatic early cutoff: it finishes the full grid before reporting and starting the historical replay.
 
@@ -38,9 +38,17 @@ All hours are **Eastern**. Every strategy uses **completed one-minute OHLCV bars
 | **Fibonacci extension**: range breakout toward 127.2% or 161.8% projected extension | Morning or afternoon (separately ranked) | 11:30 / 15:55 |
 | **Liquidity sweep / failed breakout**: wick beyond level, candle closes back inside | Morning or afternoon (separately ranked) | 11:30 / 15:55 |
 
-### Fixed profit targets versus trailing stops
+### Fixed targets, historical levels, ATR trails and staged profit locks
 
-For all **18 non-ORB strategy families**, the Deep optimizer compares every original fixed-profit-target variation with trailing-stop exits. A **fixed target** closes the trade as soon as the configured reward/risk price is reached. A **trailing variant has no fixed profit target**: it starts with the same ATR stop and activates a trail after favorable movement of **0.5R or 1R** (where R is the initial stop distance). Once active, the stop trails the most favorable observed price by **0.5 or 1 ATR**, using the **ATR measured at entry**, never an ATR revised with future prices. The stop can only tighten, never loosen. Changes calculated from a minute's high/low become executable on the **following** minute, avoiding same-bar favorable-price lookahead; stops get conservative priority and gaps fill worse than the stop. If no stop is reached, existing hard time exits still apply. The search tests all four activation/distance pairs alongside the original fixed-target candidates. ORB remains on its existing staged profit-lock/trail system.
+Each **non-ORB** family compares these five exit modes on the same causally known entry signals. ORB retains its own separate staged engine.
+
+- **FixedTarget**: Original ATR-sized initial stop and fixed reward/risk take-profit. For Fibonacci families, the fixed take-profit may be a previously completed swing or extension level, capped by the tested reward/risk value.
+- **StructureTarget**: Exits at the nearest opposing historical ES level within **0.5R to 4R** of the entry: previous complete same-contract RTH high/low, completed overnight high/low (RTH trades only), the completed first 15-minute opening range (after 09:45 ET only), a previously completed Fibonacci reference, and the high/low from the **20 or 60 bars BEFORE entry**. No valid level means that particular variant skips the trade; there is no arbitrary fallback target and no future pivot/lookahead.
+- **TrailingStop**: **25** pairs: activation at **0.5R, 1R, 1.5R, 2R or 3R** of favorable price movement and trailing distance **0.5, 1, 1.5, 2 or 3 ATR** (ATR fixed from entry). There are also four optional **cost-aware break-even** variants (1R/2R activation, 1/2 ATR trail) which raise the stop to one tick beyond entry after +1R favorable movement.
+- **StagedProfitLock**: An ORB-inspired, risk-normalized model: at +0.5R the stop moves to entry, at +1R it locks +0.5R, and at +2R it trails from maximum favorable excursion by **0.5 or 1 ATR**. This does not reproduce ORB's absolute-dollar FVG stages exactly.
+- **TargetThenTrail**: At **1.5R or 2R** favorable movement, the target becomes the **activation point for a 1 ATR trailing stop**, locking at least half the target milestone rather than exiting immediately.
+
+All modes retain one ES, the **$600 initial stop-risk cap including $10 estimated round-trip costs**, tick rounding, the same session-based hard time exits, stop-first fills and worse opening-gap fills. New trailing levels use the completed minute's favorable extreme but become active only on the **next minute**. This enlarged search increases overfitting risk. Selections continue to use training-only robustness across five expanding chronological folds, and the historical 2020–2025 replay still uses the frozen final-fold training selections.
 
 ### Price-action reference rules
 
@@ -70,7 +78,7 @@ The portfolio selects **at most one strategy per time slot**, never overlaps act
 
 With `Backtest:Mode=ResearchThenHistorical` and `Backtest:SearchProfile=Deep`, pressing Play automatically:
 
-1. Reads `dbo.MES_DATA` and evaluates all **133,184** fixed-target, trailing-stop and unchanged ORB variants across five expanding chronological walk-forward folds. Every fold chooses configurations and a portfolio routing policy **using its own training data only**, then reports the next-block OOS results for all strategy families.
+1. Reads `dbo.MES_DATA` and evaluates all **587,520** fixed, structural, trailing, staged-lock, hybrid and unchanged ORB variants across five expanding chronological walk-forward folds. Every fold chooses configurations and a portfolio routing policy **using its own training data only**, then reports the next-block OOS results for all strategy families.
 2. Takes the **new final fold's training-selected configurations and routing policy** directly from that completed optimization, including whether each non-ORB strategy uses a fixed target or a trailing stop (and its activation/distance). **No pinned IDs or recent out-of-sample profits are used to re-select those settings.**
 3. Reads `dbo.MES_DATA_2020_2025` from the **same SQL connection**, validates the sessions and historical event calendar, then simulates those frozen variants and router. It **never searches, chooses exits, or changes parameters** using older historical P&L.
 4. Prints `REPLAY_TOTAL` for all strategies, the selected portfolio and an alternative fallback-enabled routing policy, plus `REPLAY_ROUTER`, `YEARLY_REPLAY`, and graph-ready `WEEKLY_REPLAY` Monday–Sunday net/cumulative P&L. The replay distinguishes any dates that overlap the configuration-selection era. **No CSV or text report files are created.**
@@ -91,7 +99,7 @@ To switch back to the prior grid/walk-forward behavior, change `Backtest:Mode` i
 
 ## Multi-strategy terminal reporting (no CSV output)
 
-Setting `Backtest:Mode=Multi` evaluates the **same 133,184 Deep variants** and all five chronological walk-forward folds, but **does not create any CSV or text report files**. It prints session coverage, progress, per-fold winning configs and OOS scores, the original-versus-fallback router comparison, overall strategy P&L/win rate/max drawdown, portfolio summary/cost sensitivity, and in-sample maximum-profit configs. Existing report files from earlier runs are left untouched (they are not inputs).
+Setting `Backtest:Mode=Multi` evaluates the **same 587,520 Deep variants** and all five chronological walk-forward folds, but **does not create any CSV or text report files**. It prints session coverage, progress, per-fold winning configs and OOS scores, the original-versus-fallback router comparison, overall strategy P&L/win rate/max drawdown, portfolio summary/cost sensitivity, and in-sample maximum-profit configs. Existing report files from earlier runs are left untouched (they are not inputs).
 
 At the end, the console prints graph-ready **weekly out-of-sample profit** for **every one of the 19 strategies and the selected portfolio**, with one line per strategy per week. Example (illustrative numbers):
 

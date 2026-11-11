@@ -105,23 +105,79 @@ public static class MultiStrategyGrid
                     StartShiftMinutes: shift, LevelSource: source,
                     FibRatio: ratio, RetestBars: retestWindow));
         }
-        // Keep all 74,560 original fixed-target variant IDs untouched.
-        // For non-ORB recipes, compare four causal trailing-stop choices:
-        // two activation levels (in original risk units) by two trail
-        // distances (in entry ATR units). The reward-risk setting does not
-        // apply to pure trailing exits, so start from only the 1R baseline
-        // to avoid four identical copies of every trailing configuration.
-        var original = variants.ToArray();
-        foreach (var variant in original.Where(v =>
-                     v.Kind != MultiStrategyKind.Orb && v.RewardRisk == 1m))
-        foreach (var activateAt in new[] { 0.5m, 1m })
+        // Preserve all original fixed-target and 58,624 trailing IDs.
+        AppendExitOptions(variants, deep: true);
+        return variants;
+    }
+
+    // The first pass preserves old Deep and Smoke trailing variant IDs.
+    internal static void AppendExitOptions(List<MultiStrategyVariant> variants, bool deep)
+    {
+        var originals = variants.Where(v => v.Kind != MultiStrategyKind.Orb &&
+            (v.RewardRisk == 1m || (!deep && PriceActionSignals.IsPriceAction(v.Kind))))
+            .ToArray();
+        var id = variants[^1].Id;
+        foreach (var v in originals)
+        foreach (var activation in new[] { 0.5m, 1m })
         foreach (var distance in new[] { 0.5m, 1m })
-            variants.Add(variant with {
-                Id = ++id, RewardRisk = 0m,
-                ExitMode = MultiExitMode.TrailingStop,
-                TrailActivationR = activateAt,
+            variants.Add(v with {
+                Id = ++id, RewardRisk = 0m, ExitMode = MultiExitMode.TrailingStop,
+                TrailActivationR = activation, TrailAtrMultiple = distance
+            });
+
+        if (deep)
+        {
+            // 25 activation/distance pairs total, including the preserved four.
+            foreach (var v in originals)
+            foreach (var activation in new[] { 0.5m, 1m, 1.5m, 2m, 3m })
+            foreach (var distance in new[] { 0.5m, 1m, 1.5m, 2m, 3m })
+            {
+                if ((activation is 0.5m or 1m) && (distance is 0.5m or 1m))
+                    continue;
+                variants.Add(v with {
+                    Id = ++id, RewardRisk = 0m, ExitMode = MultiExitMode.TrailingStop,
+                    TrailActivationR = activation, TrailAtrMultiple = distance
+                });
+            }
+            // Selected cost-aware break-even options, without doubling the grid.
+            foreach (var v in originals)
+            foreach (var activation in new[] { 1m, 2m })
+            foreach (var distance in new[] { 1m, 2m })
+                variants.Add(v with {
+                    Id = ++id, RewardRisk = 0m, ExitMode = MultiExitMode.TrailingStop,
+                    TrailActivationR = activation, TrailAtrMultiple = distance,
+                    TrailBreakeven = true
+                });
+        }
+        else
+            foreach (var v in originals)
+                variants.Add(v with {
+                    Id = ++id, RewardRisk = 0m, ExitMode = MultiExitMode.TrailingStop,
+                    TrailActivationR = 2m, TrailAtrMultiple = 1.5m,
+                    TrailBreakeven = true
+                });
+
+        foreach (var v in originals)
+        foreach (var lookback in deep ? new[] { 20, 60 } : new[] { 20 })
+            variants.Add(v with {
+                Id = ++id, RewardRisk = 0m, ExitMode = MultiExitMode.StructureTarget,
+                TargetLookbackBars = lookback
+            });
+
+        // +0.5R -> entry stop, +1R -> lock +0.5R, +2R -> ATR trail.
+        foreach (var v in originals)
+        foreach (var distance in deep ? new[] { 0.5m, 1m } : new[] { 1m })
+            variants.Add(v with {
+                Id = ++id, RewardRisk = 0m, ExitMode = MultiExitMode.StagedProfitLock,
                 TrailAtrMultiple = distance
             });
-        return variants;
+
+        // At the R:R milestone, activate a trail INSTEAD of taking profit.
+        foreach (var v in originals)
+        foreach (var trigger in deep ? new[] { 1.5m, 2m } : new[] { 2m })
+            variants.Add(v with {
+                Id = ++id, RewardRisk = trigger, ExitMode = MultiExitMode.TargetThenTrail,
+                TrailActivationR = trigger, TrailAtrMultiple = 1m
+            });
     }
 }

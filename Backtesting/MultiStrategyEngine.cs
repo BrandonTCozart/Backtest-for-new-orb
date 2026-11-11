@@ -79,21 +79,8 @@ public static class MultiStrategyEngine
                     ? PriceLevelSource.Rolling : PriceLevelSource.OpeningRange,
                 FibRatio: kind is MultiStrategyKind.MorningFibonacciExtension or
                     MultiStrategyKind.AfternoonFibonacciExtension ? 1.272m : 0.5m));
-        // Keep the small smoke grid as a regression test of BOTH exit
-        // methods, including price-action families, without changing the
-        // IDs of its existing fixed-target candidates.
-        var original = list.ToArray();
-        foreach (var variant in original.Where(v =>
-                     v.Kind != MultiStrategyKind.Orb &&
-                     (v.RewardRisk == 1m || PriceActionSignals.IsPriceAction(v.Kind))))
-        foreach (var activateAt in new[] { 0.5m, 1m })
-        foreach (var distance in new[] { 0.5m, 1m })
-            list.Add(variant with {
-                Id = ++id, RewardRisk = 0m,
-                ExitMode = MultiExitMode.TrailingStop,
-                TrailActivationR = activateAt,
-                TrailAtrMultiple = distance
-            });
+        // Exercise all new exit families while retaining original smoke IDs.
+        MultiStrategyGrid.AppendExitOptions(list, deep: false);
         return list;
     }
 
@@ -276,9 +263,13 @@ public static class MultiStrategyEngine
         decimal? referenceTarget = null)
     {
         if (entryIndex >= lastExit || lastExit >= bars.Length) return null;
-        if (v.ExitMode == MultiExitMode.TrailingStop &&
+        if ((v.ExitMode is MultiExitMode.TrailingStop or MultiExitMode.TargetThenTrail) &&
             (v.TrailActivationR <= 0m || v.TrailAtrMultiple <= 0m))
             throw new ArgumentException("Trailing exit needs positive activation R and ATR distance.");
+        if (v.ExitMode == MultiExitMode.StagedProfitLock && v.TrailAtrMultiple <= 0m)
+            throw new ArgumentException("Staged profit lock needs a positive ATR distance.");
+        if (v.ExitMode == MultiExitMode.StructureTarget && v.TargetLookbackBars <= 0)
+            throw new ArgumentException("Structure target needs a past-bar lookback.");
         var entryAt = bars[entryIndex].T;
         var entry = bars[entryIndex].C.O;
         // Floor to a valid 0.25-point ES price increment, without exceeding
@@ -304,6 +295,15 @@ public static class MultiStrategyEngine
             return null;
         var stop = side == TradeDirection.Long ? entry - stopPoints : entry + stopPoints;
         var target = side == TradeDirection.Long ? entry + targetPoints : entry - targetPoints;
+        if (v.ExitMode == MultiExitMode.StructureTarget)
+        {
+            // No fallback to arbitrary R targets. Missing a pre-entry level
+            // means this candidate simply does not trade that session.
+            var level = StructuralTarget(v, s, bars, entryIndex, side,
+                entry, stopPoints, referenceTarget);
+            if (level is null) return null;
+            target = level.Value;
+        }
 
         // Require contiguous minute data across the entire hypothetical
         // holding period; never interpolate a missing bar or move across it.
@@ -331,26 +331,45 @@ public static class MultiStrategyEngine
                 return Create(trailActive ? "trailing_stop" : "stop", j, fill);
             }
 
-            if (v.ExitMode == MultiExitMode.FixedTarget)
+            if (v.ExitMode is MultiExitMode.FixedTarget or MultiExitMode.StructureTarget)
             {
                 var targetHit = side == TradeDirection.Long
                     ? c.H >= target : c.L <= target;
-                if (targetHit) return Create("target", j, target);
+                if (targetHit) return Create(v.ExitMode == MultiExitMode.StructureTarget
+                    ? "structure_target" : "target", j, target);
             }
             else
             {
-                // Observe favorable excursion only at the end of this minute;
-                // a newly activated/raised trail becomes executable NEXT bar.
+                // Favorable extremes are observed at the end of the minute.
+                // Raised stop is executable from the NEXT minute only.
                 var favorable = side == TradeDirection.Long
                     ? c.H - entry : entry - c.L;
                 bestFavorablePoints = Math.Max(bestFavorablePoints, favorable);
-                var activationPoints = stopPoints * v.TrailActivationR;
-                if (bestFavorablePoints >= activationPoints)
+                decimal? lockedPoints = null;
+                if (v.ExitMode == MultiExitMode.StagedProfitLock)
                 {
-                    var distancePoints = v.TrailAtrMultiple * signalAtr;
+                    if (bestFavorablePoints >= 0.5m * stopPoints)
+                        lockedPoints = 0m; // stage 1: lock entry
+                    if (bestFavorablePoints >= stopPoints)
+                        lockedPoints = 0.5m * stopPoints; // stage 2: lock 0.5R
+                    if (bestFavorablePoints >= 2m * stopPoints)
+                        lockedPoints = Math.Max(lockedPoints!.Value,
+                            bestFavorablePoints - v.TrailAtrMultiple * signalAtr);
+                }
+                else if (bestFavorablePoints >= stopPoints * v.TrailActivationR)
+                {
+                    lockedPoints = bestFavorablePoints - v.TrailAtrMultiple * signalAtr;
+                    if (v.ExitMode == MultiExitMode.TargetThenTrail)
+                        lockedPoints = Math.Max(lockedPoints.Value,
+                            0.5m * stopPoints * v.TrailActivationR);
+                }
+                // One ES tick = $12.50 gross, enough to cover assumed $10 costs.
+                if (v.TrailBreakeven && bestFavorablePoints >= stopPoints)
+                    lockedPoints = Math.Max(lockedPoints ?? decimal.MinValue, Tick);
+                if (lockedPoints is decimal locked)
+                {
                     var rawStop = side == TradeDirection.Long
-                        ? entry + bestFavorablePoints - distancePoints
-                        : entry - bestFavorablePoints + distancePoints;
+                        ? entry + locked : entry - locked;
                     var rounded = side == TradeDirection.Long
                         ? Math.Floor(rawStop / Tick) * Tick
                         : Math.Ceiling(rawStop / Tick) * Tick;
@@ -369,6 +388,64 @@ public static class MultiStrategyEngine
             new(s.Day, v.Kind, v.Id, s.Contract, side,
                 entryAt, bars[exitIndex].T.AddMinutes(1), entry, fill,
                 stopPoints * 50m + 10m, reason);
+    }
+
+    // Pre-entry ES levels only: previous complete RTH (same contract), completed
+    // overnight high/low and opening range (RTH entries only), a completed
+    // Fibonacci swing/extension, or prior rolling 20/60 one-minute bars.
+    // No future pivots. Skip a trade if no eligible opposing level exists.
+    internal static decimal? StructuralTarget(
+        MultiStrategyVariant v, MultiSession s, PriceBar[] bars, int entryIndex,
+        TradeDirection side, decimal entry, decimal stopPoints,
+        decimal? referenceTarget)
+    {
+        var candidates = new List<decimal>(12);
+        void Add(decimal? p)
+        {
+            if (p is decimal value) candidates.Add(value);
+        }
+        Add(s.PriorCompleteRthHigh);
+        Add(s.PriorCompleteRthLow);
+        if (v.Slot != MultiStrategySlot.Overnight)
+        {
+            if (entryIndex < 15) throw new InvalidOperationException(
+                "Opening range unavailable before the first 15 minutes.");
+            Add(s.OpeningHigh);
+            Add(s.OpeningLow);
+            Add(s.OvernightHigh);
+            Add(s.OvernightLow);
+        }
+        Add(referenceTarget);
+        var first = Math.Max(0, entryIndex - v.TargetLookbackBars);
+        if (first < entryIndex)
+        {
+            decimal high = decimal.MinValue, low = decimal.MaxValue;
+            for (var i = first; i < entryIndex; i++)
+            {
+                high = Math.Max(high, bars[i].C.H);
+                low = Math.Min(low, bars[i].C.L);
+            }
+            Add(high);
+            Add(low);
+        }
+
+        // Require the level to be between 0.5R and 4R in the trade direction.
+        decimal? nearest = null;
+        foreach (var level in candidates)
+        {
+            var tickLevel = side == TradeDirection.Long
+                ? Math.Floor(level / Tick) * Tick
+                : Math.Ceiling(level / Tick) * Tick;
+            var distance = side == TradeDirection.Long
+                ? tickLevel - entry : entry - tickLevel;
+            if (distance < stopPoints * 0.5m || distance > stopPoints * 4m)
+                continue;
+            if (nearest is null ||
+                (side == TradeDirection.Long && tickLevel < nearest.Value) ||
+                (side == TradeDirection.Short && tickLevel > nearest.Value))
+                nearest = tickLevel;
+        }
+        return nearest;
     }
 
     private static bool VolumePass(PriceBar[] bars, int i, decimal multiple)

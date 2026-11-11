@@ -37,9 +37,10 @@ public enum PriceLevelSource { OpeningRange, PreviousCompleteRth, Overnight, Rol
 // tests and short iterations; it must never silently be reported as Deep.
 public enum MultiSearchProfile { Smoke, Deep }
 
-// For non-ORB strategies: choose a hard take-profit or a profit-activated
-// trailing stop. ORB continues to use its existing staged lock/exit system.
-public enum MultiExitMode { FixedTarget, TrailingStop }
+// Non-ORB exit modes. ORB retains its own staged engine.
+public enum MultiExitMode {
+    FixedTarget, TrailingStop, StructureTarget, StagedProfitLock, TargetThenTrail
+}
 
 public sealed record MultiStrategyVariant(
     int Id, MultiStrategyKind Kind, int Lookback, decimal Threshold,
@@ -62,7 +63,9 @@ public sealed record MultiStrategyVariant(
     int RetestBars = 8,
     MultiExitMode ExitMode = MultiExitMode.FixedTarget,
     decimal TrailActivationR = 0m,
-    decimal TrailAtrMultiple = 0m)
+    decimal TrailAtrMultiple = 0m,
+    bool TrailBreakeven = false,
+    int TargetLookbackBars = 0)
 {
     public MultiStrategySlot Slot => ResearchSlot ?? (Kind switch
     {
@@ -93,7 +96,9 @@ public sealed record MultiStrategyVariant(
         $"research_slot={Slot}", $"reference_source={LevelSource}",
         $"fib_ratio={FibRatio}", $"retest_window_bars={RetestBars}",
         $"exit_mode={ExitMode}", $"trail_activation_R={TrailActivationR}",
-        $"trail_distance_ATR={TrailAtrMultiple}");
+        $"trail_distance_ATR={TrailAtrMultiple}",
+        $"trail_breakeven={TrailBreakeven}",
+        $"structure_lookback_bars={TargetLookbackBars}");
 }
 
 public sealed class MultiIndicators

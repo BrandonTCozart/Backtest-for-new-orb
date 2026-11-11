@@ -3,8 +3,9 @@ using Orb;
 
 namespace Backtest_for_new_orb;
 
-// Scheduled US market catalysts for ES history spanning Oct 2025-Oct 2026. All times Eastern. Only the EVENT SCHEDULE is encoded, not
+// Scheduled US market catalysts for ES history from 2020 through 2026. All times Eastern. Only the EVENT SCHEDULE is encoded, not
 // unverified surprise estimates or revised macroeconomic values.
+// 2020-2025 BLS/Fed events: HistoricalEconomicCalendar.g.cs (official archives).
 // Source calendars: bls.gov/schedule/2026/, bea.gov/news/schedule/full,
 // federalreserve.gov/monetarypolicy/fomccalendars.htm,
 // ismworld.org/supply-management-news-and-reports/reports/rob-report-calendar/
@@ -33,6 +34,7 @@ public static class EconomicCalendar
     // federal shutdown reschedules. No implied monthly dates are fabricated.
     // Verified from BLS 2025-2026, BEA 2026, Fed 2025-2026, ISM, Census.
     private static readonly EconomicEvent[] Scheduled = [
+        .. HistoricalEconomicCalendar.Scheduled,
         E("2025-10-08", "14:00", "FOMC_MINUTES", "FOMC meeting minutes", Fed, false),
         E("2025-10-24", "08:30", "CPI", "Consumer Price Index", BlsHistorical),
         E("2025-10-29", "14:00", "FOMC_DECISION", "FOMC rate decision", Fed),

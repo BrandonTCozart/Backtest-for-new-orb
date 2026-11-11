@@ -4,8 +4,8 @@ using Orb;
 namespace Backtest_for_new_orb;
 
 /// <summary>
-/// Replays FROZEN last-fold MES_DATA walk-forward variants against the older
-/// MES_DATA_2020_2025 table. No strategy search or historical re-ranking.
+/// Replays frozen training-selected variants against a separate SQL period.
+/// Supports recent-to-old diagnostics and older-to-newer forward holdout tests.
 /// </summary>
 public static class HistoricalReplayRunner
 {
@@ -99,6 +99,46 @@ public static class HistoricalReplayRunner
         var historical = await SqlMarketDataLoader.LoadAsync(
             connectionString, symbol, timeZone, tableName: "MES_DATA_2020_2025");
         return Replay(selected, historical.ActiveBars, historical.AllContractBars);
+    }
+
+    // Optimize all available earlier SQL candles, then freeze selections
+    // before loading any of the later, strictly forward test data.
+    public static async Task<int> RunHistoricalThenRecentAsync(
+        string? connectionString, string symbol, string timeZone,
+        MultiSearchProfile profile, string root)
+    {
+        Console.WriteLine("=== HISTORICAL TRAINING -> RECENT FORWARD TEST (NO LIVE ORDERS) ===");
+        Console.WriteLine("Step 1/2: full Deep-grid training on dbo.MES_DATA_2020_2025.");
+        var historical = await SqlMarketDataLoader.LoadAsync(
+            connectionString, symbol, timeZone, tableName: "MES_DATA_2020_2025");
+        if (historical.ActiveBars.Count == 0)
+            throw new InvalidOperationException(
+                "Historical training table contains no active ES candles.");
+        var first = DateOnly.FromDateTime(
+            MarketTime.ToEastern(historical.ActiveBars[0].T).Date);
+        var last = DateOnly.FromDateTime(
+            MarketTime.ToEastern(historical.ActiveBars[^1].T).Date);
+        ValidateHistoricalReleaseCoverage(first, last);
+        FrozenPlan? selected = null;
+        var status = MultiStrategyRunner.RunAndCapture(
+            historical.ActiveBars, historical.AllContractBars, root, profile,
+            plan => selected = plan, fitEntireTrainingSample: true,
+            sourceTable: "MES_DATA_2020_2025");
+        if (status != 0) return status;
+        if (selected is null)
+            throw new InvalidOperationException(
+                "No full-history training-selected configuration set was produced.");
+
+        historical = null!;
+        MultiStrategyEngine.ClearCaches();
+        OptimizationEngine.ClearCaches();
+        Console.WriteLine();
+        Console.WriteLine("Step 2/2: frozen forward evaluation on dbo.MES_DATA (2025-2026).");
+        Console.WriteLine("No forward-test outcome changes strategy variants or routing.");
+        var recent = await SqlMarketDataLoader.LoadAsync(
+            connectionString, symbol, timeZone, tableName: "MES_DATA");
+        return Replay(selected, recent.ActiveBars, recent.AllContractBars,
+            forwardHoldout: true);
     }
 
     public static async Task<int> RunAsync(
@@ -207,36 +247,57 @@ public static class HistoricalReplayRunner
     internal static IReadOnlyDictionary<MultiStrategyKind, int> PinnedIds => LastFoldIds;
 
     internal static int Replay(
-        FrozenPlan plan, IReadOnlyList<PriceBar> active, IReadOnlyList<PriceBar> all)
+        FrozenPlan plan, IReadOnlyList<PriceBar> active,
+        IReadOnlyList<PriceBar> all, bool forwardHoldout = false)
     {
         var sessions = MultiStrategyData.Build(active, all, "unused");
         if (sessions.Count == 0)
         {
-            Console.Error.WriteLine(
-                "No complete 390-minute RTH sessions found in MES_DATA_2020_2025.");
+            Console.Error.WriteLine("No complete 390-minute RTH sessions in " +
+                (forwardHoldout ? "MES_DATA." : "MES_DATA_2020_2025."));
             return 2;
         }
 
+        // A forward holdout may not reuse even one training date.
+        if (forwardHoldout && sessions[0].Day <= plan.TrainingThrough)
+            throw new InvalidOperationException(
+                "Forward test overlaps fitted training dates: " +
+                Day(sessions[0].Day) + " <= " + Day(plan.TrainingThrough));
+        if (forwardHoldout && (sessions[0].Day < CalendarStart ||
+            sessions[^1].Day > new DateOnly(2026, 10, 30)))
+            throw new InvalidOperationException(
+                "Forward evaluation extends beyond checked-in 2025-2026 event calendar.");
+
         Console.WriteLine();
-        Console.WriteLine("=== HISTORICAL REPLAY DETAILS ===");
+        Console.WriteLine(forwardHoldout ? "=== FROZEN FORWARD-TEST DETAILS ==="
+            : "=== HISTORICAL REPLAY DETAILS ===");
         Console.WriteLine("Frozen training window: " + Day(plan.TrainingFrom) +
             " through " + Day(plan.TrainingThrough));
-        Console.WriteLine("Historical SQL replay window: " + Day(sessions[0].Day) +
+        Console.WriteLine((forwardHoldout ? "Forward SQL test window: " :
+            "Historical SQL replay window: ") + Day(sessions[0].Day) +
             " through " + Day(sessions[^1].Day) +
             " (" + sessions.Count + " validated days)");
         var selectedPolicy = plan.SelectedPolicy ??
             new MultiPortfolioPolicy(MultiPortfolioMode.FixedSessions);
         Console.WriteLine("Portfolio policy: " + selectedPolicy.Description +
-            " (selected on MES_DATA training data only).");
-        Console.WriteLine("Frozen config IDs and rankings are calculated exclusively from MES_DATA.");
+            (forwardHoldout ? " (chosen exclusively on 2020-2025 training)."
+                : " (selected on MES_DATA training data only)."));
+        Console.WriteLine(forwardHoldout
+            ? "Frozen configurations and router were selected exclusively on dbo.MES_DATA_2020_2025."
+            : "Frozen config IDs and rankings are calculated exclusively from MES_DATA.");
 
-        ValidateHistoricalReleaseCoverage(sessions[0].Day, sessions[^1].Day);
-        Console.WriteLine("Historical event exclusions use the checked-in 2020-2025 release calendar.");
-        Console.WriteLine("BLS, BEA, Census and Federal Reserve dates come from official archives;");
-        Console.WriteLine("ISM first/third-business-day dates are rule-derived, with exceptions possible.");
-        if (sessions[^1].Day >= CalendarStart)
-            Console.WriteLine("Overlap note: dates from 2025-10-06 onward overlap the " +
-                              "configuration-selection era; clean nonoverlap P&L is reported separately.");
+        if (forwardHoldout)
+            Console.WriteLine("Forward exclusions use the checked-in 2025-2026 event calendar.");
+        else
+        {
+            ValidateHistoricalReleaseCoverage(sessions[0].Day, sessions[^1].Day);
+            Console.WriteLine("Historical event exclusions use the checked-in 2020-2025 release calendar.");
+            Console.WriteLine("BLS, BEA, Census and Federal Reserve dates come from official archives;");
+            Console.WriteLine("ISM first/third-business-day dates are rule-derived, with exceptions possible.");
+            if (sessions[^1].Day >= CalendarStart)
+                Console.WriteLine("Overlap note: dates from 2025-10-06 onward overlap the " +
+                    "configuration-selection era; clean nonoverlap P&L is reported separately.");
+        }
 
         var valid = sessions.Select(s => s.Day).ToHashSet();
         var orb = OptimizationData.Prepare(active.ToList(), all.ToList())
@@ -261,7 +322,7 @@ public static class HistoricalReplayRunner
                 ", parameters " + frozen.Variant.Parameters);
         }
 
-        // No older-table P&L is used to choose the strategy or priority.
+        // No evaluation-table P&L is used to choose strategy or routing priority.
         var original = MultiStrategyRunner.EvaluatePortfolio(
             selectedPolicy, choices, sessions, 0, sessions.Count);
         var fallback = MultiStrategyRunner.EvaluatePortfolio(
@@ -270,7 +331,9 @@ public static class HistoricalReplayRunner
         var allOos = original.Trades.OrderBy(t => t.EntryAt).ToArray();
 
         Console.WriteLine();
-        Console.WriteLine("=== FROZEN HISTORICAL ROUTING COMPARISON ===");
+        Console.WriteLine(forwardHoldout
+            ? "=== FROZEN FORWARD-TEST ROUTING COMPARISON ==="
+            : "=== FROZEN HISTORICAL ROUTING COMPARISON ===");
         Console.WriteLine("REPLAY_ROUTER,policy,net_usd,trades,win_rate_pct,max_drawdown_usd,fallback_fills");
         foreach (var outcome in new[] { original, fallback })
             Console.WriteLine("REPLAY_ROUTER," + outcome.Policy.Description + "," +
@@ -278,16 +341,20 @@ public static class HistoricalReplayRunner
                 F(outcome.Score.WinRate) + "," + F(outcome.Score.Drawdown) + "," +
                 outcome.FallbackTrades);
 
-        // The selection and 2020–2025 P&L are independent except for overlap
-        // dates from Oct 2025 onward, which are broken out explicitly.
+        // In forward mode all evaluation trades are strictly later than training.
         Console.WriteLine();
-        Console.WriteLine("=== FROZEN REPLAY RESULTS: 19 STRATEGIES + SELECTED PORTFOLIO ===");
-        Console.WriteLine("REPLAY_TOTAL,strategy,total_net_usd,clean_pretraining_net_usd,overlap_net_usd,trades,win_rate_pct,max_closed_trade_drawdown_usd");
+        Console.WriteLine(forwardHoldout
+            ? "=== FROZEN FORWARD RESULTS: 19 STRATEGIES + SELECTED PORTFOLIO ==="
+            : "=== FROZEN REPLAY RESULTS: 19 STRATEGIES + SELECTED PORTFOLIO ===");
+        Console.WriteLine("REPLAY_TOTAL,strategy,total_net_usd," +
+            (forwardHoldout ? "nonoverlap_forward_net_usd" : "clean_pretraining_net_usd") +
+            ",overlap_net_usd,trades,win_rate_pct,max_closed_trade_drawdown_usd");
         void Report(string name, IEnumerable<MultiStrategyTrade> source)
         {
             var trades = source.ToArray();
             var total = MultiScore.From(trades);
-            var clean = MultiScore.From(trades.Where(t => t.Day < CalendarStart));
+            var clean = MultiScore.From(trades.Where(t =>
+                forwardHoldout ? t.Day > plan.TrainingThrough : t.Day < CalendarStart));
             var overlap = total.Net - clean.Net;
             Console.WriteLine("REPLAY_TOTAL," + name + "," + F(total.Net) + "," +
                 F(clean.Net) + "," + F(overlap) + "," + total.Trades + "," +
@@ -299,7 +366,9 @@ public static class HistoricalReplayRunner
         Report("FallbackPortfolio", fallback.Trades);
 
         Console.WriteLine();
-        Console.WriteLine("=== FROZEN REPLAY YEAR-BY-YEAR PROFIT ===");
+        Console.WriteLine(forwardHoldout
+            ? "=== FROZEN FORWARD-TEST YEAR-BY-YEAR PROFIT ==="
+            : "=== FROZEN REPLAY YEAR-BY-YEAR PROFIT ===");
         Console.WriteLine("YEARLY_REPLAY,year,strategy,net_usd,trades,win_rate_pct");
         var yearlySources = individual.ToDictionary(x => x.Key.ToString(),
             x => (IEnumerable<MultiStrategyTrade>)x.Value);
@@ -317,7 +386,9 @@ public static class HistoricalReplayRunner
         var weekly = MultiStrategyRunner.BuildWeeklyOosRows(individual, allOos,
             sessions[0].Day, sessions[^1].Day);
         Console.WriteLine();
-        Console.WriteLine("=== FROZEN HISTORICAL WEEKLY PROFIT (USD, Monday-Sunday ET) ===");
+        Console.WriteLine(forwardHoldout
+            ? "=== FROZEN FORWARD-TEST WEEKLY PROFIT (USD, Monday-Sunday ET) ==="
+            : "=== FROZEN HISTORICAL WEEKLY PROFIT (USD, Monday-Sunday ET) ===");
         Console.WriteLine("WEEKLY_REPLAY,week_start_et,week_end_et,strategy,net_usd,cumulative_net_usd,trades");
         foreach (var row in weekly)
             Console.WriteLine("WEEKLY_REPLAY," + Day(row.WeekStart) + "," +
@@ -348,8 +419,8 @@ public static class HistoricalReplayRunner
                 != original.Score.Net)
             throw new InvalidOperationException("Historical portfolio weekly totals do not reconcile.");
 
-        Console.WriteLine("Historical replay completed; no files written. " +
-                          "Send this terminal output to ChatGPT for charts.");
+        Console.WriteLine((forwardHoldout ? "Frozen forward evaluation" : "Historical replay") +
+            " completed; no files written. Send terminal output to ChatGPT for charts.");
         return 0;
     }
 

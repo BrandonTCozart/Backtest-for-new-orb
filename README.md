@@ -1,6 +1,6 @@
 # ES Multi-Strategy Backtester + Original ORB Optimizer
 
-Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The program reads **ES futures one-minute candles from SQL Server `dbo.MES_DATA`** (the table name is legacy; the data are ES). The current default **first runs the full 19-family five-fold walk-forward optimization on MES_DATA**, including fixed-target versus newly tested trailing-stop variants, and **then immediately replays the freshly selected final-fold configurations and portfolio router on MES_DATA_2020_2025**. The older replay cannot change the selected settings. No live orders, Topstep downloads or candle CSV inputs are used.
+Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The current default runs the **reverse, chronological experiment** requested on November 11, 2026: **optimize all 587,520 ES configurations on `dbo.MES_DATA_2020_2025`**, then **freeze the full-historical-training-selected 19 strategy variants and portfolio router** and evaluate them **unchanged** on `dbo.MES_DATA` (2025–2026). Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
 
 ## Choose which research to run
 
@@ -8,15 +8,18 @@ Set `Backtest:Mode` in `appsettings.json` or a local override:
 
 | Mode | What runs |
 | --- | --- |
-| `ResearchThenHistorical` **(current default)** | Optimize all strategy/exit configurations and run five-fold MES_DATA walk-forward, then replay the final fold's TRAINING-selected strategies and router on the older SQL table |
-| `Multi` | Run only the new multi-strategy grid, individual strategy walk-forward tests, and a strategy-routing portfolio |
-| `HistoricalReplay` **(legacy)** | Replay the previously pinned 19 historical configs without rerunning optimization; useful only for reproducing earlier reports |
-| `Orb` | Original exhaustive 2,571,264-configuration ORB optimizer and its separate walk-forward reports |
-| `Both` | Run multi-strategy first, then the original exhaustive ORB optimizer |
+| `HistoricalThenRecent` **(current default)** | Five-fold diagnostic walk-forward on **2020–2025**; fit final strategy configurations and router on **all** validated older dates; freeze them and run forward on **2025–2026** without reoptimization |
+| `ResearchThenHistorical` | Original reverse-date study: recent 2025–2026 walk-forward; take the last fold's training-selected settings and replay them on older 2020–2025 |
+| `Multi` | Recent-data multi-strategy grid, walk-forward results, and router comparisons only |
+| `HistoricalReplay` **(legacy)** | Previously pinned 19 historical configs from an older recent fold; no fresh optimization |
+| `Orb` | Original separate exhaustive ORB-only optimizer |
+| `Both` | Recent-data multi-strategy optimizer followed by independent ORB optimizer |
 
-The **Deep** multi-strategy search in `ResearchThenHistorical` and `Multi` evaluates **587,520 configurations across 19 separately ranked strategy families**. All **74,560** original fixed-target IDs and **58,624** original trailing-stop IDs are preserved. For every non-ORB family it compares fixed reward/risk targets, completed historical support/resistance levels, expanded ATR trails, ORB-inspired staged profit locks, and target-activated trailing stops. ORB retains its own native staged system. Deep varies entry filters and signal/stop/risk variants as before. The lighter `Smoke` profile (2,040 candidates) covers every exit mode and is for quick regression tests only. Deep is roughly **4.4 times larger** than before, so expect substantially longer runs.
+The **Deep** multi-strategy grid evaluates **587,520 configurations across 19 strategy families**, retaining all original IDs and comparing fixed reward/risk targets, historical support/resistance targets, 25 ATR trailing activation/distance pairs with selected break-even choices, ORB-inspired staged profit locks, and target-activated trails. ORB itself retains its native staged exits. The `Smoke` profile (2,040 candidates) is a quick development/regression subset; default `Deep` tests everything. Running Deep on ~1,246 older validated sessions is substantially more computationally expensive than the previous ~250-session recent optimization.
 
-Set `Backtest:SearchProfile` to `Deep` (default) for the entire parameter grid or `Smoke` for a clearly labeled development subset. The combined mode uses the selected profile in its first phase and DOES NOT optimize on older SQL data. Deep has no automatic early cutoff: it finishes the full grid before reporting and starting the historical replay.
+**Training vs. testing:** In `HistoricalThenRecent`, the five chronological walk-forward folds **inside the older table** are useful internal diagnostics, but the eventual frozen configurations are chosen by a **final fit on every validated older session**, using training-period net P&L penalized for drawdown and imbalance between early/late halves, with minimum trade counts. The portfolio router is also selected using **older data only**. The `MES_DATA` table is loaded **only after** these choices are frozen. Data in the future/test table are never used to choose a strategy, exit, weekday policy, or router. The program refuses to label overlapping dates a forward holdout.
+
+**Evidence caveat:** Both date ranges have already been reviewed in earlier project iterations, so **even the chronologically later 2025–2026 set is not a pristine, never-seen holdout for the research project**. This reversal is a useful diagnostic, not proof of an independently validated trading edge.
 
 ## Strategies, trading hours and execution
 
@@ -48,7 +51,7 @@ Each **non-ORB** family compares these five exit modes on the same causally know
 - **StagedProfitLock**: An ORB-inspired, risk-normalized model: at +0.5R the stop moves to entry, at +1R it locks +0.5R, and at +2R it trails from maximum favorable excursion by **0.5 or 1 ATR**. This does not reproduce ORB's absolute-dollar FVG stages exactly.
 - **TargetThenTrail**: At **1.5R or 2R** favorable movement, the target becomes the **activation point for a 1 ATR trailing stop**, locking at least half the target milestone rather than exiting immediately.
 
-All modes retain one ES, the **$600 initial stop-risk cap including $10 estimated round-trip costs**, tick rounding, the same session-based hard time exits, stop-first fills and worse opening-gap fills. New trailing levels use the completed minute's favorable extreme but become active only on the **next minute**. This enlarged search increases overfitting risk. Selections continue to use training-only robustness across five expanding chronological folds, and the historical 2020–2025 replay still uses the frozen final-fold training selections.
+All modes retain one ES, the **$600 initial stop-risk cap including $10 estimated round-trip costs**, tick rounding, the same session-based hard time exits, stop-first fills and worse opening-gap fills. New trailing levels use the completed minute's favorable extreme but become active only on the **next minute**. This enlarged search increases overfitting risk. The original `ResearchThenHistorical` mode retains the frozen final-fold approach; the new default `HistoricalThenRecent` freezes a full-older-period fit before testing on the strictly later data.
 
 ### Price-action reference rules
 
@@ -74,28 +77,25 @@ The portfolio selects **at most one strategy per time slot**, never overlaps act
 
 **Research caveat:** We have already examined this historical period while developing ORB. Walk-forward testing reduces within-fold hindsight, but this historical dataset is not wholly unexamined; comparing many new ideas on it can still overfit. Never confuse the in-sample best-configuration reports with future returns.
 
-## Sequential 2025–2026 optimization and 2020–2025 historical evaluation (current Play mode)
+## Sequential 2020–2025 training and 2025–2026 forward evaluation (current Play mode)
 
-With `Backtest:Mode=ResearchThenHistorical` and `Backtest:SearchProfile=Deep`, pressing Play automatically:
+With `Backtest:Mode=HistoricalThenRecent` and `Backtest:SearchProfile=Deep`, pressing **Play** automatically:
 
-1. Reads `dbo.MES_DATA` and evaluates all **587,520** fixed, structural, trailing, staged-lock, hybrid and unchanged ORB variants across five expanding chronological walk-forward folds. Every fold chooses configurations and a portfolio routing policy **using its own training data only**, then reports the next-block OOS results for all strategy families.
-2. Takes the **new final fold's training-selected configurations and routing policy** directly from that completed optimization, including whether each non-ORB strategy uses a fixed target or a trailing stop (and its activation/distance). **No pinned IDs or recent out-of-sample profits are used to re-select those settings.**
-3. Reads `dbo.MES_DATA_2020_2025` from the **same SQL connection**, validates the sessions and historical event calendar, then simulates those frozen variants and router. It **never searches, chooses exits, or changes parameters** using older historical P&L.
-4. Prints `REPLAY_TOTAL` for all strategies, the selected portfolio and an alternative fallback-enabled routing policy, plus `REPLAY_ROUTER`, `YEARLY_REPLAY`, and graph-ready `WEEKLY_REPLAY` Monday–Sunday net/cumulative P&L. The replay distinguishes any dates that overlap the configuration-selection era. **No CSV or text report files are created.**
+1. Loads `dbo.MES_DATA_2020_2025`, validates the historical 2020–2025 release calendar and full ES sessions, and evaluates **all 587,520 configurations** on older history. It also prints five expanding walk-forward folds **within** the older period to diagnose training instability.
+2. **Refits on the entire validated older period** (approximately **2020-09-08 through 2025-09-08**), choosing the highest **risk/drawdown-adjusted training score** per strategy, subject to minimum trades in each half, and chooses the router using the same robust scoring and older data. Reports each final candidate in `TRAIN_FROZEN` lines with exact parameters. These are **full-sample in-sample training choices**, not older-fold OOS winners.
+3. Freezes all **19 strategy configurations and the router**, clears caches, then loads **`dbo.MES_DATA`** and evaluates those choices unchanged on the later period (roughly **2025-10-06 through 2026-10-05**). **No future-period profit, loss, exit, or other outcome is used to refit anything.**
+4. Prints `REPLAY_ROUTER`, `REPLAY_TOTAL`, `YEARLY_REPLAY`, and `WEEKLY_REPLAY` for **forward** performance, with an additional non-selected fallback-router diagnostic. The forward `REPLAY_TOTAL` column `nonoverlap_forward_net_usd` equals total net and overlap is zero by construction. No research CSV or text files are created.
 
-The legacy `Backtest:Mode=HistoricalReplay` still replays the old **hard-coded** final-fold IDs (e.g. `Orb=16184`, `MorningMomentum=24958`) and its old fixed-slot policy for reproduction only. **It does NOT capture the newly optimized trailing-stop configurations.** Use the default `ResearchThenHistorical` mode for the newly optimized end-to-end process.
+**Historical release coverage:** `Backtesting/HistoricalEconomicCalendar.g.cs` includes archived 2020–2025 scheduled releases (BLS, Federal Reserve, BEA, Census, plus some rule-derived ISM dates). The optimizer validates its historical calendar coverage **before** fitting. The newer period uses the checked-in 2025–2026 release schedule. Any overlapping training/test dates cause a hard failure. The rules use calendar timing, not future economic outcomes.
 
-```text
-REPLAY_TOTAL,strategy,total_net_usd,clean_pretraining_net_usd,overlap_net_usd,trades,win_rate_pct,max_closed_trade_drawdown_usd
-YEARLY_REPLAY,year,strategy,net_usd,trades,win_rate_pct
-WEEKLY_REPLAY,week_start_et,week_end_et,strategy,net_usd,cumulative_net_usd,trades
-```
+**Previous modes remain intact:**
+- `ResearchThenHistorical` still optimizes on the recent table and replays its **fifth-fold training** choices on the earlier table, unchanged from the preceding experiment.
+- `HistoricalReplay` still reproduces the older **hard-coded** fold IDs rather than the current optimizer's winners.
+- `Multi`, `Orb`, and `Both` retain their prior behavior.
 
-**Historical event calendar:** `Backtesting/HistoricalEconomicCalendar.g.cs` includes **723 entries for 2020–October 5, 2025**, using archived BLS (CPI, employment/NFP, PPI, JOLTS, ECI), Federal Reserve (FOMC decisions and minutes), BEA (GDP and PCE), Census (retail sales), and ISM release dates. `scripts/build_historical_calendar.py` can regenerate the source file from primary archives; the replay itself requires **no internet**. ISM dates are calculated from the published first/third-business-day rule and **may not account for every historical schedule exception**. The August 22, 2025 FOMC strategy-framework update is marked as a 10:00 ET major event, **not** a 14:00 ET interest-rate decision; verified 2020 FOMC minutes release dates are included. The replay checks that all full calendar years contain the major release categories and fails if coverage is missing.
+**Limitations:** The older table contains partial 2020 and 2025 and historically has **1,246** complete RTH sessions and **987** complete overnight windows; actual counts are revalidated at runtime. The backtest uses one-minute OHLC fills, **$10 estimated ES round-trip costs**, a conservative stop-first convention and retrospective futures-roll selection. Changing the order of training/testing does not remove previous research exposure to the recent period or make backtest results equivalent to actual fills.
 
-**Other simulation limits:** This dataset actually spans approximately **2020-09-08–2025-09-08**, not January 2020 through December 2025. In the latest run, 1,246 complete RTH sessions and 987 complete overnight sessions qualified; dates missing one-minute candles cannot be simulated as if complete. The backtest uses a fixed **$10 per ES round trip** (commissions/slippage estimate), one-minute OHLC stop-first rules and retrospective ES rollover selection. These assumptions can differ from actual trading fills. Historical replay uses the 2025–26 fold-5 configuration to analyze earlier dates, **not a portfolio that could have been selected in 2020**. Dates from October 6, 2025 onward would overlap the training era, so clean earlier totals are separately reported.
-
-To switch back to the prior grid/walk-forward behavior, change `Backtest:Mode` in `appsettings.json` to `"Multi"`. No other program settings need changing. The SQL table name is strictly whitelisted to these two read-only ES sources.
+To return to the previous run, change `Backtest:Mode` to `"ResearchThenHistorical"`. To run only the recent optimizer, set `"Multi"`.
 
 ## Multi-strategy terminal reporting (no CSV output)
 
@@ -119,7 +119,7 @@ TOTAL_PNL,MorningMomentum,1200.00,500.00,1700.00,23,43.48,800.00
 
 Weeks use **Monday–Sunday Eastern calendar dates**, and overnight positions are attributed to their associated RTH trading date. The series cover the complete OOS test interval and explicitly show **zero** on weeks with no trades; cumulative P&L resets at the start of that OOS interval. Profits include the baseline estimated **$10 round-trip per ES**. Each week aggregates **only stitched next-block OOS trades** from each fold's *training-selected* strategy configuration (not the in-sample best result). The final series named `SelectedPortfolio` represents the actual non-overlapping, training-selected policy, not the sum of independently traded strategies. Paste the terminal output into ChatGPT to plot each strategy's weekly or cumulative curve.
 
-**Note:** The separate legacy `Backtest:Mode=Orb` or `Both` exhaustive ORB runner still has its historical report output. `Multi` and the new default `ResearchThenHistorical` are terminal-only; you can bring their console output to ChatGPT for PDF and interactive HTML reports.
+**Note:** The separate legacy `Backtest:Mode=Orb` or `Both` exhaustive ORB runner still has its historical report output. `Multi` and the new default `HistoricalThenRecent` are terminal-only; you can bring their console output to ChatGPT for PDF and interactive HTML reports.
 
 To compile and run synthetic checks without SQL: `dotnet run -- --self-test`. GitHub Actions also runs a .NET 10 build and these dependency-free tests on each push. For the full historical analysis, your local SQL connection is still required.
 
@@ -154,7 +154,7 @@ Alternatively, use **Manage User Secrets** or the environment variable `Connecti
 }
 ```
 
-- **Table**: `dbo.MES_DATA` for optimization or `dbo.MES_DATA_2020_2025` for frozen historical replay (both contain **ES** contracts) with columns `ts_event`, `symbol`, `open`, `high`, `low`, `close`, `volume`. All matching rows are loaded in chronological order; the date range is whatever is actually available in SQL.
+- **Table**: `dbo.MES_DATA_2020_2025` for default full-historical optimization and `dbo.MES_DATA` for default recent forward testing (both contain **ES** contracts) with columns `ts_event`, `symbol`, `open`, `high`, `low`, `close`, `volume`. All matching rows are loaded in chronological order; the date range is whatever is actually available in SQL.
 - **Symbol**: Empty by default. SQL contract symbols are `ESZ5`, `ESH6`, `ESM6`, `ESU6`, `ESZ6`, etc., not the literal `MES`. With an empty symbol, the loader picks the highest-volume regular-session symbol for each Eastern date and keeps that one contract for the day (no mixing contracts within a trading day). To use one specific symbol instead, set `MarketData:Symbol` to the exact value in the database. If it finds no rows, it prints available symbols and counts.
 - **Time zone**: `America/New_York` interprets `ts_event` as Eastern wall-clock time, the way `orb-analysis` currently uses it for the 9:30 market open. **If your database actually stores UTC timestamps**, change `MarketData:TimestampTimeZone` to `UTC` before running; incorrect settings shift the opening range and invalidate the test.
 - **Pricing**: Despite the table name, these are **ES candles**, so initial 1–2 ES contracts use actual ES OHLC, ES volume and $50/point. Optional Stage-6 **MES reversal** trades still use ES candles as a **price proxy**, with MES $5/point P&L. For overlapping contracts, the loader picks one active ES contract for each trading day, while retaining **all contract months' one-minute candles** for that contract's prior seven-day FVG/reference-level lookback. The daily winner is selected using full-session volume; this roll-selection choice is retrospective, not an execution-time contract selector.

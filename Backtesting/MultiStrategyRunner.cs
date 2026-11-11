@@ -72,13 +72,18 @@ public static class MultiStrategyRunner
     internal static int RunAndCapture(
         List<PriceBar> active, List<PriceBar> all, string root,
         MultiSearchProfile profile,
-        Action<HistoricalReplayRunner.FrozenPlan> onSelected) =>
-        RunCore(active, all, root, profile, onSelected);
+        Action<HistoricalReplayRunner.FrozenPlan> onSelected,
+        bool fitEntireTrainingSample = false,
+        string sourceTable = "MES_DATA") =>
+        RunCore(active, all, root, profile, onSelected,
+            fitEntireTrainingSample, sourceTable);
 
     private static int RunCore(
         List<PriceBar> active, List<PriceBar> all, string root,
         MultiSearchProfile profile,
-        Action<HistoricalReplayRunner.FrozenPlan>? onSelected)
+        Action<HistoricalReplayRunner.FrozenPlan>? onSelected,
+        bool fitEntireTrainingSample = false,
+        string sourceTable = "MES_DATA")
     {
         // No report artifacts are written. The SQL run reports results in the terminal.
         Console.WriteLine();
@@ -89,15 +94,25 @@ public static class MultiStrategyRunner
             Console.Error.WriteLine("Need at least 20 validated full-length RTH sessions.");
             return 2;
         }
-        if (sessions[0].Day < new DateOnly(2025, 10, 6) ||
+        if (sessions[0].Day < new DateOnly(2020, 9, 8) ||
             sessions[^1].Day > new DateOnly(2026, 10, 30))
-            Console.WriteLine("WARNING: scheduled economic-event calendar does not cover every tested date.");
+            Console.WriteLine("WARNING: checked-in economic-event calendar does not cover every tested date.");
+        Console.WriteLine("Research SQL source: dbo." + sourceTable);
+        if (fitEntireTrainingSample)
+            Console.WriteLine("Final frozen selection fits ALL validated training-source dates; " +
+                "internal walk-forward blocks are diagnostics, not the forward holdout.");
 
         var days = sessions.Select(x => x.Day).ToHashSet();
         var originalOrb = OptimizationData.Prepare(active, all)
             .Where(x => x.Range is not null && days.Contains(x.Day))
             .OrderBy(x => x.Day).ToArray();
         var folds = CreateResearchFolds(sessions.Count);
+        // The optional extra pseudo-fold accumulates scores for the complete
+        // historical training sample, without reading the future test table.
+        var scoringFolds = fitEntireTrainingSample
+            ? folds.Append(new WalkForwardFold(0, 0, sessions.Count,
+                sessions.Count, sessions.Count)).ToArray()
+            : folds;
         var sessionDays = sessions.Select(s => s.Day).ToArray();
         var variants = MultiStrategyEngine.EnumerateVariants(profile);
         var kinds = Enum.GetValues<MultiStrategyKind>();
@@ -118,6 +133,7 @@ public static class MultiStrategyRunner
             .ToArray();
         var fullProfit = new Dictionary<MultiStrategyKind, Choice>();
         var fullWinRate = new Dictionary<MultiStrategyKind, Choice>();
+        var fullRobust = new Dictionary<MultiStrategyKind, Choice>();
         var eligible = new int[folds.Length];
         var minimumFull = Math.Max(10, (sessions.Count + 3) / 4);
         MultiStrategyEngine.ClearCaches();
@@ -133,7 +149,26 @@ public static class MultiStrategyRunner
                 // One chronological scoring pass computes all fold halves, full
                 // training windows and overall metrics. This avoids 16 scans,
                 // allocations and trade sorts per candidate.
-                var (full, foldScores) = ScoreCandidateRanges(trades, sessionDays, folds);
+                var (full, foldScores) = ScoreCandidateRanges(trades, sessionDays, scoringFolds);
+                if (fitEntireTrainingSample)
+                {
+                    var whole = foldScores[^1];
+                    // Long-history trading rates can be lower than in the
+                    // recent year; require meaningful trade counts in each
+                    // half, but never use forward-test P&L to pick finalists.
+                    var minimum = Math.Max(10, (sessions.Count + 11) / 12);
+                    if (full.Trades >= minimum &&
+                        whole.Early.Trades >= Math.Max(3, minimum / 4) &&
+                        whole.Late.Trades >= Math.Max(3, minimum / 4))
+                    {
+                        var candidate = new Choice(variant, full, trades,
+                            Robustness(full, whole.Early, whole.Late),
+                            whole.Early, whole.Late);
+                        if (!fullRobust.TryGetValue(variant.Kind, out var current) ||
+                            BetterRobust(candidate, current))
+                            fullRobust[variant.Kind] = candidate;
+                    }
+                }
                 var fullQualifies = full.Trades >= minimumFull;
                 if (fullQualifies)
                 {
@@ -196,7 +231,7 @@ public static class MultiStrategyRunner
             _ => new List<decimal>());
         var summary = new List<string> {
             "DEEP MULTI-STRATEGY ES RESEARCH (NO ORDERS)",
-            "Source: dbo.MES_DATA; complete RTH trading dates: " + sessions.Count,
+            "Source: dbo." + sourceTable + "; complete RTH trading dates: " + sessions.Count,
             "Date range: " + Day(sessions[0].Day) + " through " + Day(sessions[^1].Day),
             "Complete overnight windows: " + sessions.Count(x => x.Overnight is not null),
             "Profile: " + profile + "; candidate configurations: " + variants.Count,
@@ -500,9 +535,83 @@ public static class MultiStrategyRunner
                     ", settings: " + selected.Variant.Parameters);
         Console.WriteLine("Console-only reporting: no CSV or text reports created; existing files are untouched.");
         if (onSelected is not null)
-            onSelected(lastFoldPlan ?? throw new InvalidOperationException(
-                "No last-fold plan was selected for historical replay."));
+        {
+            if (fitEntireTrainingSample)
+            {
+                var missing = kinds.Where(k => !fullRobust.ContainsKey(k)).ToArray();
+                if (missing.Length > 0)
+                    throw new InvalidOperationException(
+                        "No eligible full-history training configuration for: " +
+                        string.Join(", ", missing) +
+                        ". Cannot silently skip a family or use forward data for selection.");
+                var policy = SelectTrainingRouter(fullRobust, sessions, 0, sessions.Count);
+                Console.WriteLine();
+                Console.WriteLine("=== FULL-HISTORICAL-TRAINING FINAL SELECTION (FROZEN) ===");
+                Console.WriteLine("Training: dbo." + sourceTable + ", " +
+                    Day(sessions[0].Day) + " through " + Day(sessions[^1].Day) +
+                    " (" + sessions.Count + " validated days)");
+                Console.WriteLine("Router selected on historical training only: " +
+                    policy.Description);
+                foreach (var kind in kinds)
+                {
+                    var selected = fullRobust[kind];
+                    Console.WriteLine("TRAIN_FROZEN," + kind + ",config=" +
+                        selected.Variant.Id + ",train_net=" + F(selected.Score.Net) +
+                        ",train_robustness=" + F(selected.Robustness) +
+                        ",trades=" + selected.Score.Trades +
+                        ",settings=" + selected.Variant.Parameters);
+                }
+                onSelected(HistoricalReplayRunner.FromSelection(
+                    sessions[0].Day, sessions[^1].Day, fullRobust, policy));
+            }
+            else
+                onSelected(lastFoldPlan ?? throw new InvalidOperationException(
+                    "No last-fold plan was selected for historical replay."));
+        }
         return 0;
+    }
+
+    // The same router choices and robustness ordering used in each
+    // chronological training fold, now fitted once on the COMPLETE historical
+    // training sample. Evaluation on the later table is strictly downstream.
+    private static MultiPortfolioPolicy SelectTrainingRouter(
+        IReadOnlyDictionary<MultiStrategyKind, Choice> winners,
+        IReadOnlyList<MultiSession> sessions, int from, int to)
+    {
+        var policies = new List<MultiPortfolioPolicy>();
+        foreach (var kind in winners.Keys)
+            policies.Add(new MultiPortfolioPolicy(MultiPortfolioMode.Single, kind));
+        policies.Add(new MultiPortfolioPolicy(MultiPortfolioMode.FixedSessions));
+        policies.Add(new MultiPortfolioPolicy(MultiPortfolioMode.FixedSessions,
+            UseFallbacks: true));
+        foreach (var overnight in new[] { 1m, 2m })
+        foreach (var orb in new[] { 2m, 3m })
+        foreach (var morning in new[] { 1m, 2m })
+        foreach (var afternoon in new[] { 2m, 3m })
+        {
+            var basis = new MultiPortfolioPolicy(MultiPortfolioMode.AdaptiveRegimes,
+                null, overnight, orb, morning, afternoon);
+            policies.Add(basis);
+            policies.Add(basis with { UseFallbacks = true });
+        }
+
+        var midpoint = from + (to - from) / 2;
+        var scored = policies.Select(policy =>
+        {
+            var whole = EvaluatePortfolio(policy, winners, sessions, from, to).Score;
+            var first = EvaluatePortfolio(policy, winners, sessions, from, midpoint).Score;
+            var last = EvaluatePortfolio(policy, winners, sessions, midpoint, to).Score;
+            return (Policy: policy, Score: whole,
+                Robustness: Robustness(whole, first, last));
+        }).ToArray();
+        var minimum = Math.Max(6, (to - from + 5) / 6);
+        var admissible = scored.Where(x => x.Score.Trades >= minimum).ToArray();
+        return (admissible.Length == 0 ? scored : admissible)
+            .OrderByDescending(x => x.Robustness)
+            .ThenByDescending(x => x.Score.Net)
+            .ThenBy(x => x.Score.Drawdown)
+            .ThenBy(x => x.Policy.Description, StringComparer.Ordinal)
+            .First().Policy;
     }
 
     // Validate portfolio invariants directly on the stitched OOS trades.

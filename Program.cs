@@ -29,7 +29,11 @@ try
     if (!Enum.TryParse<MultiSearchProfile>(profileText, true, out var searchProfile))
         throw new ArgumentException(
             "Backtest:SearchProfile must be Deep or Smoke (Deep is the full search).");
-    var mode = (configuration["Backtest:Mode"] ?? "Multi").Trim().ToLowerInvariant();
+    var mode = (configuration["Backtest:Mode"] ?? "HistoricalThenRecent").Trim().ToLowerInvariant();
+    if (mode is "historicalthenrecent" or "reverse" or "historicaltrainthenrecent")
+        return await HistoricalReplayRunner.RunHistoricalThenRecentAsync(
+            configuration.GetConnectionString("MarketData"), symbol, timeZone,
+            searchProfile, root);
     if (mode is "researchthenhistorical" or "combined" or "pipeline")
         return await HistoricalReplayRunner.RunSequentialAsync(
             configuration.GetConnectionString("MarketData"), symbol, timeZone,
@@ -48,7 +52,7 @@ try
 
 
     Console.WriteLine("Backtest mode: " + mode +
-        " (Multi=walk-forward grid; ResearchThenHistorical=both SQL periods; HistoricalReplay=legacy pinned replay; Orb=ORB; Both=multi plus ORB).");
+        " (HistoricalThenRecent=older training + newer forward test; ResearchThenHistorical=reverse; Multi=recent walk-forward; HistoricalReplay=legacy pinned replay; Orb=ORB; Both=multi plus ORB).");
     switch (mode)
     {
         case "multi":
@@ -65,7 +69,7 @@ try
         }
         default:
             throw new ArgumentException(
-                "Backtest:Mode must be ResearchThenHistorical, Multi, HistoricalReplay, Orb, or Both (appsettings.json).");
+                "Backtest:Mode must be HistoricalThenRecent, ResearchThenHistorical, Multi, HistoricalReplay, Orb, or Both (appsettings.json).");
     }
 }
 catch (Exception error)

@@ -329,6 +329,54 @@ public static class MultiStrategySelfTests
                    !Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories).Any(),
                 "Frozen historical replay must not write CSV or text files.");
 
+
+            // Forward tests must retain frozen 2020-2025 choices and refuse
+            // any overlapping evaluation date (no future-data selection).
+            var olderTraining = fresh with {
+                TrainingFrom = new DateOnly(2020, 9, 8),
+                TrainingThrough = new DateOnly(2025, 9, 8)
+            };
+            using var forwardCaptured = new StringWriter();
+            try
+            {
+                Console.SetOut(forwardCaptured);
+                Ensure(HistoricalReplayRunner.Replay(olderTraining,
+                    syntheticYear, syntheticYear, forwardHoldout: true) == 0,
+                    "Reverse frozen plan must evaluate later synthetic ES sessions.");
+            }
+            finally
+            {
+                Console.SetOut(summaryWriter);
+            }
+            var forwardReport = forwardCaptured.ToString();
+            Ensure(forwardReport.Contains("FROZEN FORWARD-TEST DETAILS") &&
+                   forwardReport.Contains("nonoverlap_forward_net_usd") &&
+                   forwardReport.Contains("Forward SQL test window:") &&
+                   !forwardReport.Contains("clean_pretraining_net_usd"),
+                "Forward test must be labelled as future evaluation, not older replay.");
+            foreach (var line in forwardReport.Split('\n')
+                         .Where(x => x.StartsWith("REPLAY_TOTAL,", StringComparison.Ordinal))
+                         .Skip(1))
+            {
+                var cells = line.Trim().Split(',');
+                Ensure(cells.Length == 8 &&
+                       decimal.Parse(cells[2], System.Globalization.CultureInfo.InvariantCulture) ==
+                           decimal.Parse(cells[3], System.Globalization.CultureInfo.InvariantCulture) &&
+                       decimal.Parse(cells[4], System.Globalization.CultureInfo.InvariantCulture) == 0m,
+                    "Forward holdout must have entirely non-overlapping P&L.");
+            }
+            try
+            {
+                _ = HistoricalReplayRunner.Replay(olderTraining with {
+                    TrainingThrough = sampleDays[0]
+                }, syntheticYear, syntheticYear, forwardHoldout: true);
+                throw new InvalidOperationException(
+                    "Forward test accepted overlapping training sessions.");
+            }
+            catch (InvalidOperationException ex) when (
+                ex.Message.StartsWith("Forward test overlaps fitted training dates:",
+                    StringComparison.Ordinal)) { }
+
             Console.WriteLine("PASS: full 25-session synthetic walk-forward and terminal-only reporting.");
             Console.WriteLine("PASS: synthetic full/missing RTH and overnight minute coverage,");
             Console.WriteLine("      lookahead boundary checks, trade risk/close-time invariants,");

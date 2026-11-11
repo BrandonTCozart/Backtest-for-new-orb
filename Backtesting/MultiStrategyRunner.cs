@@ -909,6 +909,17 @@ public static class MultiStrategyRunner
 
         // Adaptive primary strategy is chosen from the relevant trend/reversal
         // training cohort, using only features available at the routing time.
+        // Regime-aware fallback options must stay IN that same cohort, rather
+        // than silently crossing from trending into a reversal setup.
+        var rankedByRegime = winners.Values
+            .Where(c => c.Score.Net > 0m)
+            .GroupBy(c => (Slot: c.Variant.Slot,
+                           Trend: IsTrendStrategy(c.Variant.Kind)))
+            .ToDictionary(g => g.Key, g => g
+                .OrderByDescending(c => c.Robustness)
+                .ThenByDescending(c => c.Score.Net)
+                .ThenBy(c => c.Variant.Id)
+                .Select(c => c.Variant.Kind).ToArray());
         var bestByRegime = winners.Values
             .Where(c => c.Score.Net > 0m)
             .GroupBy(c => (Slot: c.Variant.Slot,
@@ -928,6 +939,7 @@ public static class MultiStrategyRunner
                 if (bestByRegime.TryGetValue((slot, trend), out var selected))
                     preferred[slot] = selected;
                 else if (policy.UseFallbacks &&
+                         policy.Mode != MultiPortfolioMode.RegimeAware &&
                          rankedBySlot.TryGetValue(slot, out var choices) &&
                          choices.Length > 0)
                     preferred[slot] = choices[0];
@@ -993,9 +1005,14 @@ public static class MultiStrategyRunner
                 // A non-fallback policy evaluates only the primary.
                 var ranked = new List<MultiStrategyKind> { primary };
                 if (policy.UseFallbacks &&
-                    policy.Mode != MultiPortfolioMode.Single &&
-                    rankedBySlot.TryGetValue(slot, out var options))
+                    policy.Mode != MultiPortfolioMode.Single)
+                {
+                    var options = policy.Mode == MultiPortfolioMode.RegimeAware
+                        ? rankedByRegime.GetValueOrDefault(
+                            (slot, IsTrendStrategy(primary)), [])
+                        : rankedBySlot.GetValueOrDefault(slot, []);
                     ranked.AddRange(options.Where(kind => kind != primary));
+                }
 
                 var available = ranked.Select((kind, priority) =>
                     (Kind: kind, Priority: priority))

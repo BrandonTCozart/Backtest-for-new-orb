@@ -722,6 +722,37 @@ public static class MultiStrategySelfTests
                 UseFallbacks: true), withPrimary, new[] { session }, 0, 1);
         Ensure(cautious.Score.Trades == 0,
             "A regime-aware router must not trade without prior as-of reference data.");
+        var trendDay = new MultiSession {
+            Day = session.Day, Contract = session.Contract,
+            Rth = session.Rth, Overnight = session.Overnight,
+            RthIndicators = session.RthIndicators,
+            OvernightIndicators = session.OvernightIndicators,
+            OpeningHigh = session.OpeningHigh, OpeningLow = session.OpeningLow,
+            OpeningWidth = session.OpeningWidth,
+            EarlyAtr = session.EarlyAtr,
+            EarlyVolumeRatio = session.EarlyVolumeRatio,
+            OpeningMove = session.OpeningMove,
+            AfternoonMove = session.AfternoonMove,
+            AfternoonAtr = session.AfternoonAtr,
+            FirstHourOvernightMove = session.FirstHourOvernightMove,
+            FirstHourOvernightAtr = session.FirstHourOvernightAtr,
+            MorningRegime = new RegimeObservation(MultiStrategySlot.Morning,
+                MarketTime.ToUtc(day, new TimeOnly(9, 45)), true,
+                3m, 0.6m, 1m, 1m)
+        };
+        var regimePolicy = new MultiPortfolioPolicy(
+            MultiPortfolioMode.RegimeAware, UseFallbacks: true);
+        var constrained = MultiStrategyRunner.EvaluatePortfolio(regimePolicy,
+            withPrimary, new[] { trendDay }, 0, 1);
+        Ensure(constrained.Trades.Count == 1 &&
+               constrained.Trades[0].Kind == primary.Kind &&
+               constrained.FallbackTrades == 0,
+            "Trend-regime fallback must never cross into an earlier reversal signal.");
+        var absentTrend = MultiStrategyRunner.EvaluatePortfolio(regimePolicy,
+            noPrimary, new[] { trendDay }, 0, 1);
+        Ensure(absentTrend.Score.Trades == 0,
+            "If no trend-family setup qualifies, skip rather than "
+            + "enter a reversal from the opposite regime.");
     }
 
     private static void TestCausalContractRoll()

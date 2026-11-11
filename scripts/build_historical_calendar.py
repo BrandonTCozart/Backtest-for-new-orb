@@ -126,12 +126,22 @@ def fed():
             continue
         day = dt.datetime.strptime(m.group(1), "%Y%m%d").date()
         if START <= day <= END:
+            # The Fed also uses monetaryYYYYMMDDa for non-rate announcements.
+            # August 22, 2025 was a 10 AM framework update, NOT a rate decision.
+            if day == dt.date(2025, 8, 22):
+                add(day, "FOMC_FRAMEWORK",
+                    "FOMC monetary policy strategy framework update", "10:00",
+                    "https://www.federalreserve.gov/newsevents/pressreleases/monetary20250822a.htm",
+                    True)
+                continue
             add(day, "FOMC_DECISION", "FOMC rate decision", "14:00", url, True)
             meetings.add(day)
     by_year = Counter(x.year for x in meetings)
     for year in (2021, 2022, 2023, 2024):
         if by_year[year] < 7:
             raise RuntimeError(f"Federal Reserve {year} decisions incomplete: {by_year}")
+    if by_year[2025] < 6:
+        raise RuntimeError(f"Federal Reserve 2025 rate decisions incomplete: {by_year}")
     # Fed 2020 FOMC archive statements use a different URL structure.
     # These three regular meetings cover the historical dataset's 2020 portion.
     for text in ("2020-09-16", "2020-11-05", "2020-12-16"):
@@ -149,7 +159,15 @@ def fed():
             minutes += 1
     if minutes < 25:
         raise RuntimeError(f"Too few official FOMC minutes release dates: {minutes}")
-    print(f"Fed minutes: {minutes}")
+    # The current Fed calendar omits 2020; the last two 2020 meeting
+    # minutes and the December 2020 meeting minutes released in Jan 2021
+    # are relevant to MES_DATA_2020_2025. Use official 2 PM releases.
+    for day_text in ("2020-10-07", "2020-11-25", "2021-01-06"):
+        day = dt.date.fromisoformat(day_text)
+        source = ("https://www.federalreserve.gov/newsevents/pressreleases/"
+                  f"monetary{day:%Y%m%d}a.htm")
+        add(day, "FOMC_MINUTES", "FOMC meeting minutes", "14:00", source, False)
+    print(f"Fed minutes: {minutes} archive-indexed + 3 verified older releases")
 
 def bea():
     # BEA reorganized product IDs across years; fetch both historical and

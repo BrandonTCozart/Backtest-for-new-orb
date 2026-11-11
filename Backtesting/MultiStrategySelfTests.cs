@@ -209,7 +209,7 @@ public static class MultiStrategySelfTests
             {
                 Console.SetOut(captured);
                 status = MultiStrategyRunner.Run(syntheticYear, syntheticYear,
-                    folder, MultiSearchProfile.Smoke);
+                    folder, MultiSearchProfile.Smoke, parallelWorkers: 1);
             }
             finally
             {
@@ -218,6 +218,34 @@ public static class MultiStrategySelfTests
             Ensure(status == 0,
                 "Complete synthetic multi-strategy backtest should return success.");
             var terminal = captured.ToString();
+
+            // A 4-worker run MUST choose exactly the same configurations,
+            // fold scores, portfolio trades, and weekly P&L as a 1-worker run.
+            // Progress lines and the worker-count banner are intentionally
+            // excluded: their display order is scheduling-dependent.
+            using var parallelCaptured = new StringWriter();
+            int parallelStatus;
+            try
+            {
+                Console.SetOut(parallelCaptured);
+                parallelStatus = MultiStrategyRunner.Run(syntheticYear,
+                    syntheticYear, folder, MultiSearchProfile.Smoke,
+                    parallelWorkers: 4);
+            }
+            finally
+            {
+                Console.SetOut(regularOut);
+            }
+            static string DeterministicReport(string report) => string.Join("\n",
+                report.Split('\n').Where(line =>
+                    !line.StartsWith("Deep multi-strategy grid:", StringComparison.Ordinal) &&
+                    !line.StartsWith("Optimizer workers:", StringComparison.Ordinal)));
+            Ensure(parallelStatus == status &&
+                   DeterministicReport(terminal) ==
+                   DeterministicReport(parallelCaptured.ToString()),
+                "Parallel versus serial candidates must select identical " +
+                "variants, router, fold scores and OOS trade results.");
+            Console.WriteLine("PASS: serial and 4-worker full smoke-grid backtests match.");
             Ensure(terminal.Contains("WEEKLY_OOS,week_start_et,week_end_et,strategy,net_usd,cumulative_net_usd,trades"),
                 "Weekly terminal output must have the expected graph-ready columns.");
             var weeklyLines = terminal.Split('\n')

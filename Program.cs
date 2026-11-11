@@ -29,15 +29,20 @@ try
     if (!Enum.TryParse<MultiSearchProfile>(profileText, true, out var searchProfile))
         throw new ArgumentException(
             "Backtest:SearchProfile must be Deep or Smoke (Deep is the full search).");
+    var workersText = configuration["Backtest:ParallelWorkers"] ?? "0";
+    if (!int.TryParse(workersText, out var parallelWorkers) ||
+        parallelWorkers < 0 || parallelWorkers > 32)
+        throw new ArgumentException(
+            "Backtest:ParallelWorkers must be 0 (automatic) or 1 through 32.");
     var mode = (configuration["Backtest:Mode"] ?? "HistoricalThenRecent").Trim().ToLowerInvariant();
     if (mode is "historicalthenrecent" or "reverse" or "historicaltrainthenrecent")
         return await HistoricalReplayRunner.RunHistoricalThenRecentAsync(
             configuration.GetConnectionString("MarketData"), symbol, timeZone,
-            searchProfile, root);
+            searchProfile, root, parallelWorkers);
     if (mode is "researchthenhistorical" or "combined" or "pipeline")
         return await HistoricalReplayRunner.RunSequentialAsync(
             configuration.GetConnectionString("MarketData"), symbol, timeZone,
-            searchProfile, root);
+            searchProfile, root, parallelWorkers);
     if (mode is "historicalreplay" or "historical")
         return await HistoricalReplayRunner.RunAsync(
             configuration.GetConnectionString("MarketData"), symbol, timeZone, searchProfile);
@@ -56,14 +61,16 @@ try
     switch (mode)
     {
         case "multi":
-            return MultiStrategyRunner.Run(bars, marketData.AllContractBars, root, searchProfile);
+            return MultiStrategyRunner.Run(bars, marketData.AllContractBars, root, searchProfile,
+                parallelWorkers);
         case "orb":
             return WalkForwardRunner.Run(bars, marketData.AllContractBars);
         case "both":
         {
             // Console-only multi-strategy results precede the original ORB optimizer.
             var multiExit = MultiStrategyRunner.Run(
-                bars, marketData.AllContractBars, root, searchProfile);
+                bars, marketData.AllContractBars, root, searchProfile,
+                parallelWorkers);
             if (multiExit != 0) return multiExit;
             return WalkForwardRunner.Run(bars, marketData.AllContractBars);
         }

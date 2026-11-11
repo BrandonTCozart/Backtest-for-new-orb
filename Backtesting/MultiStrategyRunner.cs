@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Collections.Concurrent;
 using Orb;
 
 namespace Backtest_for_new_orb;
@@ -64,8 +65,10 @@ public static class MultiStrategyRunner
 
     public static int Run(
         List<PriceBar> active, List<PriceBar> all, string root,
-        MultiSearchProfile profile = MultiSearchProfile.Deep) =>
-        RunCore(active, all, root, profile, null);
+        MultiSearchProfile profile = MultiSearchProfile.Deep,
+        int parallelWorkers = 0) =>
+        RunCore(active, all, root, profile, null,
+            parallelWorkers: parallelWorkers);
 
     // The combined pipeline captures the ACTUAL last-fold training winners
     // and routing policy. This avoids re-fitting or stale pinned variant IDs.
@@ -74,16 +77,18 @@ public static class MultiStrategyRunner
         MultiSearchProfile profile,
         Action<HistoricalReplayRunner.FrozenPlan> onSelected,
         bool fitEntireTrainingSample = false,
-        string sourceTable = "MES_DATA") =>
+        string sourceTable = "MES_DATA",
+        int parallelWorkers = 0) =>
         RunCore(active, all, root, profile, onSelected,
-            fitEntireTrainingSample, sourceTable);
+            fitEntireTrainingSample, sourceTable, parallelWorkers);
 
     private static int RunCore(
         List<PriceBar> active, List<PriceBar> all, string root,
         MultiSearchProfile profile,
         Action<HistoricalReplayRunner.FrozenPlan>? onSelected,
         bool fitEntireTrainingSample = false,
-        string sourceTable = "MES_DATA")
+        string sourceTable = "MES_DATA",
+        int parallelWorkers = 0)
     {
         // No report artifacts are written. The SQL run reports results in the terminal.
         Console.WriteLine();
@@ -128,6 +133,14 @@ public static class MultiStrategyRunner
         Console.WriteLine("Session positions do not overlap; 1 ES on new strategies; " +
                           "stops capped at $600 including estimated $10/contract costs.");
         Console.WriteLine("Console-only reporting; only current candidate and selected winners are retained in memory.");
+        if (parallelWorkers < 0 || parallelWorkers > 32)
+            throw new ArgumentOutOfRangeException(nameof(parallelWorkers),
+                "Parallel workers must be 0 (automatic) or 1–32.");
+        var workers = parallelWorkers == 0
+            ? Math.Min(8, Math.Max(1, Environment.ProcessorCount - 1))
+            : parallelWorkers;
+        Console.WriteLine("Optimizer workers: " + workers +
+            " (ORB runs sequentially; other strategies use independent worker caches).");
 
         var bestForFold = folds.Select(_ => new Dictionary<MultiStrategyKind, Choice>())
             .ToArray();
@@ -138,24 +151,24 @@ public static class MultiStrategyRunner
         var minimumFull = Math.Max(10, (sessions.Count + 3) / 4);
         MultiStrategyEngine.ClearCaches();
         OptimizationEngine.ClearCaches();
+        // Keep ORB sequential because its mature OptimizationEngine has shared
+        // mutable caches. All other 18 families use thread-local entry/exit
+        // caches and can safely evaluate independent variant IDs concurrently.
+        // A short lock merges ONLY candidate scores/rankings; the expensive
+        // candle simulation and scoring always run outside that lock.
+        var selectionLock = new object();
+        var progressLock = new object();
+        var tested = 0;
+        void EvaluateCandidate(MultiStrategyVariant variant)
         {
-            // Full parameter grid still evaluated, without per-candidate disk I/O.
-            var tested = 0;
-            foreach (var variant in variants)
+            var trades = MultiStrategyEngine.Generate(variant, sessions, originalOrb);
+            var (full, foldScores) = ScoreCandidateRanges(
+                trades, sessionDays, scoringFolds);
+            lock (selectionLock)
             {
-                // Stream ONE candidate at a time; outcomes for losing candidates
-                // are discarded rather than retaining millions of trades.
-                var trades = MultiStrategyEngine.Generate(variant, sessions, originalOrb);
-                // One chronological scoring pass computes all fold halves, full
-                // training windows and overall metrics. This avoids 16 scans,
-                // allocations and trade sorts per candidate.
-                var (full, foldScores) = ScoreCandidateRanges(trades, sessionDays, scoringFolds);
                 if (fitEntireTrainingSample)
                 {
                     var whole = foldScores[^1];
-                    // Long-history trading rates can be lower than in the
-                    // recent year; require meaningful trade counts in each
-                    // half, but never use forward-test P&L to pick finalists.
                     var minimum = Math.Max(10, (sessions.Count + 11) / 12);
                     if (full.Trades >= minimum &&
                         whole.Early.Trades >= Math.Max(3, minimum / 4) &&
@@ -169,16 +182,16 @@ public static class MultiStrategyRunner
                             fullRobust[variant.Kind] = candidate;
                     }
                 }
-                var fullQualifies = full.Trades >= minimumFull;
-                if (fullQualifies)
+                if (full.Trades >= minimumFull)
                 {
-                    var candidate = new Choice(variant, full, trades, full.Net,
-                        full, full);
+                    var candidate = new Choice(variant, full, trades,
+                        full.Net, full, full);
                     if (!fullProfit.TryGetValue(variant.Kind, out var previous) ||
                         Better(full, variant.Id, previous.Score, previous.Variant.Id))
                         fullProfit[variant.Kind] = candidate;
                     if (!fullWinRate.TryGetValue(variant.Kind, out previous) ||
-                        HigherWinRate(full, variant.Id, previous.Score, previous.Variant.Id))
+                        HigherWinRate(full, variant.Id, previous.Score,
+                            previous.Variant.Id))
                         fullWinRate[variant.Kind] = candidate;
                 }
 
@@ -190,33 +203,52 @@ public static class MultiStrategyRunner
                     var train = foldScores[f].Train;
                     var minimum = Math.Max(6, (fold.TrainingSessions + 5) / 6);
                     var qualifies = train.Trades >= minimum &&
-                                    early.Trades >= Math.Max(3, minimum / 4) &&
-                                    late.Trades >= Math.Max(3, minimum / 4);
-                    // Penalize both high peak-to-trough drawdown and dependence
-                    // on an unprofitable training half. This does not use OOS.
-                    var robustness = Robustness(train, early, late);
+                        early.Trades >= Math.Max(3, minimum / 4) &&
+                        late.Trades >= Math.Max(3, minimum / 4);
                     if (!qualifies) continue;
                     eligible[f]++;
                     var candidate = new Choice(variant, train, trades,
-                        robustness, early, late);
+                        Robustness(train, early, late), early, late);
                     if (!bestForFold[f].TryGetValue(variant.Kind, out var current) ||
                         BetterRobust(candidate, current))
                         bestForFold[f][variant.Kind] = candidate;
                 }
-
-                tested++;
-                if (tested % 500 == 0)
-                {
-                    Console.WriteLine("Deep multi-strategy grid: " +
-                                      tested.ToString("N0", Ci) + "/" +
-                                      variants.Count.ToString("N0", Ci));
-                }
-                // The existing ORB simulator caches extensive signal/trade
-                // variations. Purge periodically to avoid unbounded memory;
-                // the non-ORB cache itself holds at most one entry recipe.
-                if (variant.Kind == MultiStrategyKind.Orb && tested % 1200 == 0)
-                    OptimizationEngine.ClearCaches();
             }
+
+            var completed = Interlocked.Increment(ref tested);
+            if (completed % 500 == 0)
+                lock (progressLock)
+                    Console.WriteLine("Deep multi-strategy grid: " +
+                        completed.ToString("N0", Ci) + "/" +
+                        variants.Count.ToString("N0", Ci));
+            if (variant.Kind == MultiStrategyKind.Orb && completed % 1200 == 0)
+                OptimizationEngine.ClearCaches();
+        }
+
+        var firstNonOrb = 0;
+        while (firstNonOrb < variants.Count &&
+               variants[firstNonOrb].Kind == MultiStrategyKind.Orb)
+            firstNonOrb++;
+        for (var i = 0; i < firstNonOrb; i++)
+            EvaluateCandidate(variants[i]);
+
+        if (workers == 1)
+        {
+            for (var i = firstNonOrb; i < variants.Count; i++)
+                EvaluateCandidate(variants[i]);
+        }
+        else
+        {
+            // Contiguous chunks favor the per-thread signal/exit cache.
+            // Only read-only session data is shared across parallel workers.
+            Parallel.ForEach(
+                Partitioner.Create(firstNonOrb, variants.Count, 256),
+                new ParallelOptions { MaxDegreeOfParallelism = workers },
+                range =>
+                {
+                    for (var i = range.Item1; i < range.Item2; i++)
+                        EvaluateCandidate(variants[i]);
+                });
         }
 
         HistoricalReplayRunner.FrozenPlan? lastFoldPlan = null;

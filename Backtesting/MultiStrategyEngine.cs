@@ -19,27 +19,56 @@ public static class MultiStrategyEngine
         decimal FibRatio, int RetestBars);
     private readonly record struct Signal(
         int Index, TradeDirection Side, decimal Atr, decimal? TargetPrice = null);
-    private static SignalKey? CurrentRecipe;
-    private static readonly Dictionary<DateOnly, Signal?> SignalCache = new();
-
-    // Entry and exit simulation is invariant to weekday and economic-event
-    // exclusions. Most Deep candidates differ only by those filters, so avoid
-    // resimulating their identical minute-by-minute price paths.
+    // Entry/exit caching varies only by signal recipe and exit policy,
+    // never by event/weekday exclusions. Parallel workers must NOT share these
+    // mutable dictionaries. ThreadStatic also keeps caches local to whichever
+    // worker evaluates a contiguous grid partition.
     private readonly record struct ExitKey(
         decimal StopAtr, decimal RewardRisk, MultiExitMode Mode,
         decimal ActivateR, decimal DistanceAtr, bool BreakEven, int LevelLookback);
     private const int MaxCachedExitsPerEntryRecipe = 40;
-    private static readonly Dictionary<ExitKey, Dictionary<DateOnly, MultiStrategyTrade>>
-        ExitCache = new();
-    private static readonly Queue<ExitKey> ExitCacheOrder = new();
-    internal static int CachedExitRecipeCount => ExitCache.Count;
 
+    private sealed class WorkerCache
+    {
+        internal long Epoch;
+        internal SignalKey? CurrentRecipe;
+        internal readonly Dictionary<DateOnly, Signal?> Signals = new();
+        internal readonly Dictionary<ExitKey, Dictionary<DateOnly, MultiStrategyTrade>>
+            Exits = new();
+        internal readonly Queue<ExitKey> Order = new();
+
+        internal void Reset()
+        {
+            CurrentRecipe = null;
+            Signals.Clear();
+            Exits.Clear();
+            Order.Clear();
+        }
+    }
+
+    [ThreadStatic] private static WorkerCache? _threadCache;
+    private static long _cacheEpoch = 1;
+
+    private static WorkerCache GetCache()
+    {
+        var cache = _threadCache ??= new WorkerCache();
+        var current = System.Threading.Volatile.Read(ref _cacheEpoch);
+        if (cache.Epoch != current)
+        {
+            cache.Reset();
+            cache.Epoch = current;
+        }
+        return cache;
+    }
+
+    internal static int CachedExitRecipeCount => GetCache().Exits.Count;
+
+    // A new source dataset invalidates caches on EVERY worker, including
+    // previously pooled threads that were idle when this method was called.
     public static void ClearCaches()
     {
-        CurrentRecipe = null;
-        SignalCache.Clear();
-        ExitCache.Clear();
-        ExitCacheOrder.Clear();
+        System.Threading.Interlocked.Increment(ref _cacheEpoch);
+        _ = GetCache();
     }
 
     public static IReadOnlyList<MultiStrategyVariant> EnumerateVariants(
@@ -130,42 +159,38 @@ public static class MultiStrategyEngine
             variant.Threshold, variant.VolumeMultiple, variant.StartShiftMinutes,
             variant.RsiExtreme, variant.TrendConfirmation,
             variant.LevelSource, variant.FibRatio, variant.RetestBars);
-        if (CurrentRecipe != recipe)
+        var cache = GetCache();
+        if (cache.CurrentRecipe != recipe)
         {
-            SignalCache.Clear();
-            ExitCache.Clear();
-            ExitCacheOrder.Clear();
-            CurrentRecipe = recipe;
+            cache.Reset();
+            cache.CurrentRecipe = recipe;
         }
 
         var key = new ExitKey(variant.StopAtrMultiple, variant.RewardRisk,
             variant.ExitMode, variant.TrailActivationR, variant.TrailAtrMultiple,
             variant.TrailBreakeven, variant.TargetLookbackBars);
-        if (!ExitCache.TryGetValue(key, out var rawTrades))
+        if (!cache.Exits.TryGetValue(key, out var rawTrades))
         {
             rawTrades = new Dictionary<DateOnly, MultiStrategyTrade>();
             foreach (var s in sessions)
             {
-                if (!SignalCache.TryGetValue(s.Day, out var signal))
+                if (!cache.Signals.TryGetValue(s.Day, out var signal))
                 {
                     signal = FindSignal(variant, s);
-                    SignalCache.Add(s.Day, signal);
+                    cache.Signals.Add(s.Day, signal);
                 }
                 var trade = MakeTrade(variant, s, signal);
                 if (trade is not null)
                     rawTrades.Add(s.Day, trade);
             }
 
-            // Cache only a bounded set of exit variants for this entry recipe.
-            // FIFO eviction prevents thousands of simulated configurations from
-            // accumulating in memory during the 587,520-candidate search.
-            if (ExitCache.Count >= MaxCachedExitsPerEntryRecipe)
+            if (cache.Exits.Count >= MaxCachedExitsPerEntryRecipe)
             {
-                var oldest = ExitCacheOrder.Dequeue();
-                ExitCache.Remove(oldest);
+                var oldest = cache.Order.Dequeue();
+                cache.Exits.Remove(oldest);
             }
-            ExitCache.Add(key, rawTrades);
-            ExitCacheOrder.Enqueue(key);
+            cache.Exits.Add(key, rawTrades);
+            cache.Order.Enqueue(key);
         }
 
         foreach (var s in sessions)

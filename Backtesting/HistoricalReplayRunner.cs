@@ -72,7 +72,7 @@ public static class HistoricalReplayRunner
     // frozen historical evaluation on MES_DATA_2020_2025.
     public static async Task<int> RunSequentialAsync(
         string? connectionString, string symbol, string timeZone,
-        MultiSearchProfile profile, string root)
+        MultiSearchProfile profile, string root, int parallelWorkers = 0)
     {
         Console.WriteLine("=== COMBINED RESEARCH + HISTORICAL VALIDATION ===");
         Console.WriteLine("Step 1/2: walk-forward optimize dbo.MES_DATA using " + profile + ".");
@@ -81,7 +81,7 @@ public static class HistoricalReplayRunner
         FrozenPlan? selected = null;
         var status = MultiStrategyRunner.RunAndCapture(
             recent.ActiveBars, recent.AllContractBars, root, profile,
-            plan => selected = plan);
+            plan => selected = plan, parallelWorkers: parallelWorkers);
         if (status != 0) return status;
         if (selected is null)
             throw new InvalidOperationException("No training-selected historical plan.");
@@ -105,7 +105,7 @@ public static class HistoricalReplayRunner
     // before loading any of the later, strictly forward test data.
     public static async Task<int> RunHistoricalThenRecentAsync(
         string? connectionString, string symbol, string timeZone,
-        MultiSearchProfile profile, string root)
+        MultiSearchProfile profile, string root, int parallelWorkers = 0)
     {
         Console.WriteLine("=== HISTORICAL TRAINING -> RECENT FORWARD TEST (NO LIVE ORDERS) ===");
         Console.WriteLine("Step 1/2: full Deep-grid training on dbo.MES_DATA_2020_2025.");
@@ -123,7 +123,8 @@ public static class HistoricalReplayRunner
         var status = MultiStrategyRunner.RunAndCapture(
             historical.ActiveBars, historical.AllContractBars, root, profile,
             plan => selected = plan, fitEntireTrainingSample: true,
-            sourceTable: "MES_DATA_2020_2025");
+            sourceTable: "MES_DATA_2020_2025",
+            parallelWorkers: parallelWorkers);
         if (status != 0) return status;
         if (selected is null)
             throw new InvalidOperationException(

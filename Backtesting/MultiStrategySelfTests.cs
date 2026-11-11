@@ -141,8 +141,26 @@ public static class MultiStrategySelfTests
                    EconomicCalendar.IsFedDecisionDay(new DateOnly(2024, 9, 18)) &&
                    EconomicCalendar.IsBeforeFedDecision(new DateOnly(2024, 9, 17)),
                 "Official 2020–2025 GDP/PCE/CPI/retail/FOMC dates and ISM rule dates must be loaded.");
+            // Include the real replay's partial boundary years, not just 2021-2024.
             HistoricalReplayRunner.ValidateHistoricalReleaseCoverage(
-                new DateOnly(2021, 1, 1), new DateOnly(2024, 12, 31));
+                new DateOnly(2020, 9, 8), new DateOnly(2025, 9, 8));
+            Ensure(EconomicCalendar.Events(new DateOnly(2020, 10, 7))
+                       .Any(e => e.Code == "FOMC_MINUTES" &&
+                                 e.TimeEt == TimeSpan.FromHours(14)) &&
+                   EconomicCalendar.Events(new DateOnly(2020, 11, 25))
+                       .Any(e => e.Code == "FOMC_MINUTES") &&
+                   EconomicCalendar.Events(new DateOnly(2021, 1, 6))
+                       .Any(e => e.Code == "FOMC_MINUTES"),
+                "Archived 2020 FOMC minutes must remain available for intraday rules.");
+            var frameworkDay = new DateOnly(2025, 8, 22);
+            Ensure(!EconomicCalendar.IsFedDecisionDay(frameworkDay) &&
+                   !EconomicCalendar.IsBeforeFedDecision(new DateOnly(2025, 8, 21)) &&
+                   EconomicCalendar.Events(frameworkDay).Any(e =>
+                       e.Code == "FOMC_FRAMEWORK" &&
+                       e.TimeEt == TimeSpan.FromHours(10)) &&
+                   !EconomicCalendar.AllowsEntry(EconomicEventRule.AvoidIntradayReleaseWindow,
+                       frameworkDay, MarketTime.ToUtc(frameworkDay, new TimeOnly(10, 0))),
+                "The Aug 22 2025 framework update must not count as a rate decision.");
             Ensure(!EconomicCalendar.AllowsEntry(
                 EconomicEventRule.AvoidMajorReleaseDay, new DateOnly(2024, 2, 29),
                 MarketTime.ToUtc(new DateOnly(2024, 2, 29), new TimeOnly(10, 0))),

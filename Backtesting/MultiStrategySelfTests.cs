@@ -128,6 +128,30 @@ public static class MultiStrategySelfTests
             Ensure(EconomicCalendar.Events(new DateOnly(2025, 10, 24)).Any(e => e.Code == "CPI") &&
                    EconomicCalendar.Events(new DateOnly(2026, 8, 7)).Any(e => e.Code == "NFP"),
                 "Historical economic-calendar coverage should not silently disappear.");
+            Ensure(EconomicCalendar.Events(new DateOnly(2023, 7, 12))
+                       .Any(e => e.Code == "CPI") &&
+                   EconomicCalendar.Events(new DateOnly(2024, 2, 29))
+                       .Any(e => e.Code == "PCE") &&
+                   EconomicCalendar.Events(new DateOnly(2024, 1, 3))
+                       .Any(e => e.Code == "ISM_MANUFACTURING") &&
+                   EconomicCalendar.Events(new DateOnly(2022, 1, 27))
+                       .Any(e => e.Code == "GDP") &&
+                   EconomicCalendar.Events(new DateOnly(2023, 6, 15))
+                       .Any(e => e.Code == "RETAIL_SALES") &&
+                   EconomicCalendar.IsFedDecisionDay(new DateOnly(2024, 9, 18)) &&
+                   EconomicCalendar.IsBeforeFedDecision(new DateOnly(2024, 9, 17)),
+                "Official 2020–2025 GDP/PCE/CPI/retail/FOMC dates and ISM rule dates must be loaded.");
+            HistoricalReplayRunner.ValidateHistoricalReleaseCoverage(
+                new DateOnly(2021, 1, 1), new DateOnly(2024, 12, 31));
+            Ensure(!EconomicCalendar.AllowsEntry(
+                EconomicEventRule.AvoidMajorReleaseDay, new DateOnly(2024, 2, 29),
+                MarketTime.ToUtc(new DateOnly(2024, 2, 29), new TimeOnly(10, 0))),
+                "Archived PCE releases must suppress avoid-major-day entries.");
+            Ensure(!EconomicCalendar.AllowsEntry(
+                EconomicEventRule.AvoidFomcDayAndPriorTradingDay,
+                new DateOnly(2024, 9, 17),
+                MarketTime.ToUtc(new DateOnly(2024, 9, 17), new TimeOnly(10, 0))),
+                "Archived FOMC decisions must suppress the prior trading day.");
 
             // End-to-end dry run: 25 complete synthetic ES sessions exercise the
             // entire candidate grid, all three walk-forward folds, causal router,

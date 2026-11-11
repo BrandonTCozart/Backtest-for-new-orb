@@ -30,6 +30,10 @@ try
         throw new ArgumentException(
             "Backtest:SearchProfile must be Deep or Smoke (Deep is the full search).");
     var mode = (configuration["Backtest:Mode"] ?? "Multi").Trim().ToLowerInvariant();
+    if (mode is "researchthenhistorical" or "combined" or "pipeline")
+        return await HistoricalReplayRunner.RunSequentialAsync(
+            configuration.GetConnectionString("MarketData"), symbol, timeZone,
+            searchProfile, root);
     if (mode is "historicalreplay" or "historical")
         return await HistoricalReplayRunner.RunAsync(
             configuration.GetConnectionString("MarketData"), symbol, timeZone, searchProfile);
@@ -44,7 +48,7 @@ try
 
 
     Console.WriteLine("Backtest mode: " + mode +
-        " (Multi=walk-forward grid; HistoricalReplay=frozen 2020-2025 test; Orb=exhaustive ORB; Both=both).");
+        " (Multi=walk-forward grid; ResearchThenHistorical=both SQL periods; HistoricalReplay=legacy pinned replay; Orb=ORB; Both=multi plus ORB).");
     switch (mode)
     {
         case "multi":
@@ -61,7 +65,7 @@ try
         }
         default:
             throw new ArgumentException(
-                "Backtest:Mode must be Multi, HistoricalReplay, Orb, or Both (appsettings.json).");
+                "Backtest:Mode must be ResearchThenHistorical, Multi, HistoricalReplay, Orb, or Both (appsettings.json).");
     }
 }
 catch (Exception error)

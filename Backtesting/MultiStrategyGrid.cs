@@ -105,6 +105,23 @@ public static class MultiStrategyGrid
                     StartShiftMinutes: shift, LevelSource: source,
                     FibRatio: ratio, RetestBars: retestWindow));
         }
+        // Keep all 74,560 original fixed-target variant IDs untouched.
+        // For non-ORB recipes, compare four causal trailing-stop choices:
+        // two activation levels (in original risk units) by two trail
+        // distances (in entry ATR units). The reward-risk setting does not
+        // apply to pure trailing exits, so start from only the 1R baseline
+        // to avoid four identical copies of every trailing configuration.
+        var original = variants.ToArray();
+        foreach (var variant in original.Where(v =>
+                     v.Kind != MultiStrategyKind.Orb && v.RewardRisk == 1m))
+        foreach (var activateAt in new[] { 0.5m, 1m })
+        foreach (var distance in new[] { 0.5m, 1m })
+            variants.Add(variant with {
+                Id = ++id, RewardRisk = 0m,
+                ExitMode = MultiExitMode.TrailingStop,
+                TrailActivationR = activateAt,
+                TrailAtrMultiple = distance
+            });
         return variants;
     }
 }

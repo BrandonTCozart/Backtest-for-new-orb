@@ -37,6 +37,10 @@ public enum PriceLevelSource { OpeningRange, PreviousCompleteRth, Overnight, Rol
 // tests and short iterations; it must never silently be reported as Deep.
 public enum MultiSearchProfile { Smoke, Deep }
 
+// For non-ORB strategies: choose a hard take-profit or a profit-activated
+// trailing stop. ORB continues to use its existing staged lock/exit system.
+public enum MultiExitMode { FixedTarget, TrailingStop }
+
 public sealed record MultiStrategyVariant(
     int Id, MultiStrategyKind Kind, int Lookback, decimal Threshold,
     decimal StopAtrMultiple, decimal RewardRisk, decimal VolumeMultiple,
@@ -55,7 +59,10 @@ public sealed record MultiStrategyVariant(
     MultiStrategySlot? ResearchSlot = null,
     PriceLevelSource LevelSource = PriceLevelSource.OpeningRange,
     decimal FibRatio = 0.618m,
-    int RetestBars = 8)
+    int RetestBars = 8,
+    MultiExitMode ExitMode = MultiExitMode.FixedTarget,
+    decimal TrailActivationR = 0m,
+    decimal TrailAtrMultiple = 0m)
 {
     public MultiStrategySlot Slot => ResearchSlot ?? (Kind switch
     {
@@ -84,7 +91,9 @@ public sealed record MultiStrategyVariant(
         $"ORB_retest={OrbRetest}", $"ORB_initial_risk_cap={OrbRiskCap}",
         $"ORB_fallback_risk={OrbFallbackRisk}",
         $"research_slot={Slot}", $"reference_source={LevelSource}",
-        $"fib_ratio={FibRatio}", $"retest_window_bars={RetestBars}");
+        $"fib_ratio={FibRatio}", $"retest_window_bars={RetestBars}",
+        $"exit_mode={ExitMode}", $"trail_activation_R={TrailActivationR}",
+        $"trail_distance_ATR={TrailAtrMultiple}");
 }
 
 public sealed class MultiIndicators

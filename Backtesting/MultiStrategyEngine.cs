@@ -79,6 +79,21 @@ public static class MultiStrategyEngine
                     ? PriceLevelSource.Rolling : PriceLevelSource.OpeningRange,
                 FibRatio: kind is MultiStrategyKind.MorningFibonacciExtension or
                     MultiStrategyKind.AfternoonFibonacciExtension ? 1.272m : 0.5m));
+        // Keep the small smoke grid as a regression test of BOTH exit
+        // methods, including price-action families, without changing the
+        // IDs of its existing fixed-target candidates.
+        var original = list.ToArray();
+        foreach (var variant in original.Where(v =>
+                     v.Kind != MultiStrategyKind.Orb &&
+                     (v.RewardRisk == 1m || PriceActionSignals.IsPriceAction(v.Kind))))
+        foreach (var activateAt in new[] { 0.5m, 1m })
+        foreach (var distance in new[] { 0.5m, 1m })
+            list.Add(variant with {
+                Id = ++id, RewardRisk = 0m,
+                ExitMode = MultiExitMode.TrailingStop,
+                TrailActivationR = activateAt,
+                TrailAtrMultiple = distance
+            });
         return list;
     }
 
@@ -255,12 +270,15 @@ public static class MultiStrategyEngine
         return null;
     }
 
-    private static MultiStrategyTrade? SimulateBracket(
+    internal static MultiStrategyTrade? SimulateBracket(
         MultiStrategyVariant v, MultiSession s, PriceBar[] bars, int entryIndex,
         int lastExit, TradeDirection side, decimal signalAtr,
         decimal? referenceTarget = null)
     {
         if (entryIndex >= lastExit || lastExit >= bars.Length) return null;
+        if (v.ExitMode == MultiExitMode.TrailingStop &&
+            (v.TrailActivationR <= 0m || v.TrailAtrMultiple <= 0m))
+            throw new ArgumentException("Trailing exit needs positive activation R and ATR distance.");
         var entryAt = bars[entryIndex].T;
         var entry = bars[entryIndex].C.O;
         // Floor to a valid 0.25-point ES price increment, without exceeding
@@ -270,7 +288,8 @@ public static class MultiStrategyEngine
                 signalAtr * v.StopAtrMultiple) / Tick) * Tick;
         if (stopPoints < 0.5m) return null;
         var targetPoints = Math.Floor(stopPoints * v.RewardRisk / Tick) * Tick;
-        if (referenceTarget is decimal reference)
+        if (v.ExitMode == MultiExitMode.FixedTarget &&
+            referenceTarget is decimal reference)
         {
             // Fibonacci exits use the actual projected/previous-swing
             // reference, bounded by the tested reward-risk cap. Tick-round
@@ -281,7 +300,8 @@ public static class MultiStrategyEngine
             targetPoints = Math.Min(targetPoints,
                 Math.Floor(referenceDistance / Tick) * Tick);
         }
-        if (targetPoints < Tick) return null;
+        if (v.ExitMode == MultiExitMode.FixedTarget && targetPoints < Tick)
+            return null;
         var stop = side == TradeDirection.Long ? entry - stopPoints : entry + stopPoints;
         var target = side == TradeDirection.Long ? entry + targetPoints : entry - targetPoints;
 
@@ -291,21 +311,56 @@ public static class MultiStrategyEngine
             if (bars[j].T != bars[j - 1].T.AddMinutes(1))
                 return null;
 
+        // A stop can only be tightened AFTER a completed candle. Otherwise
+        // updating from that candle's high/low and then claiming an earlier
+        // stop fill would silently assume an unknown intrabar event order.
+        var currentStop = stop;
+        var bestFavorablePoints = 0m;
+        var trailActive = false;
         for (var j = entryIndex; j <= lastExit; j++)
         {
             var c = bars[j].C;
-            var stopped = side == TradeDirection.Long ? c.L <= stop : c.H >= stop;
+            var stopped = side == TradeDirection.Long
+                ? c.L <= currentStop : c.H >= currentStop;
             if (stopped)
             {
-                // Conservative ordering when both stop and target are within
-                // the same minute. A stop gap gets the worse opening fill.
+                // Initial and trailing stop both use stop-first precedence.
+                // Opening gaps get the worse fill, never a free stop fill.
                 var fill = side == TradeDirection.Long
-                    ? Math.Min(c.O, stop) : Math.Max(c.O, stop);
-                return Create("stop", j, fill);
+                    ? Math.Min(c.O, currentStop) : Math.Max(c.O, currentStop);
+                return Create(trailActive ? "trailing_stop" : "stop", j, fill);
             }
 
-            var targetHit = side == TradeDirection.Long ? c.H >= target : c.L <= target;
-            if (targetHit) return Create("target", j, target);
+            if (v.ExitMode == MultiExitMode.FixedTarget)
+            {
+                var targetHit = side == TradeDirection.Long
+                    ? c.H >= target : c.L <= target;
+                if (targetHit) return Create("target", j, target);
+            }
+            else
+            {
+                // Observe favorable excursion only at the end of this minute;
+                // a newly activated/raised trail becomes executable NEXT bar.
+                var favorable = side == TradeDirection.Long
+                    ? c.H - entry : entry - c.L;
+                bestFavorablePoints = Math.Max(bestFavorablePoints, favorable);
+                var activationPoints = stopPoints * v.TrailActivationR;
+                if (bestFavorablePoints >= activationPoints)
+                {
+                    var distancePoints = v.TrailAtrMultiple * signalAtr;
+                    var rawStop = side == TradeDirection.Long
+                        ? entry + bestFavorablePoints - distancePoints
+                        : entry - bestFavorablePoints + distancePoints;
+                    var rounded = side == TradeDirection.Long
+                        ? Math.Floor(rawStop / Tick) * Tick
+                        : Math.Ceiling(rawStop / Tick) * Tick;
+                    currentStop = side == TradeDirection.Long
+                        ? Math.Max(currentStop, rounded)
+                        : Math.Min(currentStop, rounded);
+                    trailActive = true;
+                }
+            }
+
             if (j == lastExit) return Create("time_exit", j, c.C);
         }
         return null;

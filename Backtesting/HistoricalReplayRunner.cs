@@ -46,7 +46,60 @@ public static class HistoricalReplayRunner
 
     internal sealed record FrozenPlan(
         DateOnly TrainingFrom, DateOnly TrainingThrough,
-        IReadOnlyDictionary<MultiStrategyKind, FrozenChoice> Choices);
+        IReadOnlyDictionary<MultiStrategyKind, FrozenChoice> Choices,
+        MultiPortfolioPolicy? SelectedPolicy = null);
+
+    // Called by the sequential run ONLY after fold 5's optimizer has finished
+    // selecting with MES_DATA training P&L. No historical P&L enters this plan.
+    internal static FrozenPlan FromSelection(
+        DateOnly trainingFrom, DateOnly trainingThrough,
+        IReadOnlyDictionary<MultiStrategyKind, MultiStrategyRunner.Choice> chosen,
+        MultiPortfolioPolicy selectedPolicy)
+    {
+        var kinds = Enum.GetValues<MultiStrategyKind>();
+        if (kinds.Any(kind => !chosen.ContainsKey(kind)))
+            throw new InvalidOperationException(
+                "Last walk-forward fold did not produce a qualified configuration " +
+                "for every strategy. Historical comparison cannot silently use stale IDs.");
+        return new FrozenPlan(trainingFrom, trainingThrough,
+            chosen.ToDictionary(x => x.Key, x => new FrozenChoice(
+                x.Value.Variant, x.Value.Score, x.Value.Early,
+                x.Value.Late, x.Value.Robustness)), selectedPolicy);
+    }
+
+    // Default run: (1) freshly re-optimize and walk-forward test MES_DATA,
+    // (2) reuse the final training-selected variants and router for a clean
+    // frozen historical evaluation on MES_DATA_2020_2025.
+    public static async Task<int> RunSequentialAsync(
+        string? connectionString, string symbol, string timeZone,
+        MultiSearchProfile profile, string root)
+    {
+        Console.WriteLine("=== COMBINED RESEARCH + HISTORICAL VALIDATION ===");
+        Console.WriteLine("Step 1/2: walk-forward optimize dbo.MES_DATA using " + profile + ".");
+        var recent = await SqlMarketDataLoader.LoadAsync(
+            connectionString, symbol, timeZone, tableName: "MES_DATA");
+        FrozenPlan? selected = null;
+        var status = MultiStrategyRunner.RunAndCapture(
+            recent.ActiveBars, recent.AllContractBars, root, profile,
+            plan => selected = plan);
+        if (status != 0) return status;
+        if (selected is null)
+            throw new InvalidOperationException("No training-selected historical plan.");
+        // Old candle arrays and signal caches need not remain in memory while
+        // reading the much larger historical SQL source.
+        recent = null!;
+        MultiStrategyEngine.ClearCaches();
+        OptimizationEngine.ClearCaches();
+
+        Console.WriteLine();
+        Console.WriteLine("Step 2/2: frozen replay on dbo.MES_DATA_2020_2025.");
+        Console.WriteLine("Every strategy variant AND the router policy come from " +
+                          "the new last-fold MES_DATA training selection.");
+        Console.WriteLine("Older-table outcomes never revise these choices.");
+        var historical = await SqlMarketDataLoader.LoadAsync(
+            connectionString, symbol, timeZone, tableName: "MES_DATA_2020_2025");
+        return Replay(selected, historical.ActiveBars, historical.AllContractBars);
+    }
 
     public static async Task<int> RunAsync(
         string? connectionString, string symbol, string timeZone,
@@ -171,8 +224,10 @@ public static class HistoricalReplayRunner
         Console.WriteLine("Historical SQL replay window: " + Day(sessions[0].Day) +
             " through " + Day(sessions[^1].Day) +
             " (" + sessions.Count + " validated days)");
-        Console.WriteLine("Portfolio policy: Fixed_best_per_session (no fallback), " +
-            "exactly as selected in the latest MES_DATA fold.");
+        var selectedPolicy = plan.SelectedPolicy ??
+            new MultiPortfolioPolicy(MultiPortfolioMode.FixedSessions);
+        Console.WriteLine("Portfolio policy: " + selectedPolicy.Description +
+            " (selected on MES_DATA training data only).");
         Console.WriteLine("Frozen config IDs and rankings are calculated exclusively from MES_DATA.");
 
         ValidateHistoricalReleaseCoverage(sessions[0].Day, sessions[^1].Day);
@@ -207,11 +262,11 @@ public static class HistoricalReplayRunner
         }
 
         // No older-table P&L is used to choose the strategy or priority.
-        var basePolicy = new MultiPortfolioPolicy(MultiPortfolioMode.FixedSessions);
         var original = MultiStrategyRunner.EvaluatePortfolio(
-            basePolicy, choices, sessions, 0, sessions.Count);
+            selectedPolicy, choices, sessions, 0, sessions.Count);
         var fallback = MultiStrategyRunner.EvaluatePortfolio(
-            basePolicy with { UseFallbacks = true }, choices, sessions, 0, sessions.Count);
+            selectedPolicy with { UseFallbacks = true }, choices,
+            sessions, 0, sessions.Count);
         var allOos = original.Trades.OrderBy(t => t.EntryAt).ToArray();
 
         Console.WriteLine();

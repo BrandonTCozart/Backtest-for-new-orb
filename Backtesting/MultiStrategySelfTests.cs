@@ -50,8 +50,8 @@ public static class MultiStrategySelfTests
 
             var variants = MultiStrategyEngine.EnumerateVariants(MultiSearchProfile.Smoke);
             Ensure(variants.Count == variants.Select(x => x.Id).Distinct().Count() &&
-                   variants.Count == 440,
-                "Smoke grid must contain 440 unique variants.");
+                   variants.Count == 1240,
+                "Smoke grid must retain 440 fixed configs plus 800 trailing variations.");
             var deepFolds = MultiStrategyRunner.CreateResearchFolds(249);
             Ensure(deepFolds.Length == 5 &&
                    deepFolds[0].TrainingEnd == 99 &&
@@ -65,8 +65,20 @@ public static class MultiStrategySelfTests
                     "Five forward test blocks must be contiguous, nonoverlapping and chronological.");
             var deepVariants = MultiStrategyEngine.EnumerateVariants(MultiSearchProfile.Deep);
             Ensure(deepVariants.Count == deepVariants.Select(x => x.Id).Distinct().Count() &&
-                   deepVariants.Count == 74560,
-                "Deep grid must contain 74,560 unique reviewed configurations.");
+                   deepVariants.Count == 133184,
+                "Deep grid must contain all 74,560 fixed configs plus 58,624 trailing variations.");
+            Ensure(deepVariants.Take(74560).All(v =>
+                       v.ExitMode == MultiExitMode.FixedTarget) &&
+                   deepVariants.Skip(74560).All(v =>
+                       v.ExitMode == MultiExitMode.TrailingStop &&
+                       v.RewardRisk == 0m &&
+                       v.TrailActivationR is 0.5m or 1m &&
+                       v.TrailAtrMultiple is 0.5m or 1m) &&
+                   Enum.GetValues<MultiStrategyKind>()
+                       .Where(k => k != MultiStrategyKind.Orb)
+                       .All(k => deepVariants.Any(v =>
+                           v.Kind == k && v.ExitMode == MultiExitMode.TrailingStop)),
+                "Every original config ID is stable; all 18 non-ORB families test both exits.");
             Ensure(Enum.GetValues<MultiStrategyKind>().All(k =>
                 deepVariants.Any(v => v.Kind == k)),
                 "Deep grid must cover all seven strategy families.");
@@ -108,6 +120,7 @@ public static class MultiStrategySelfTests
                     "Morning and overnight trades must be independent of later RTH bars.");
             }
 
+            TestTrailingStops(session);
             TestPriceActionSignals(date, folder);
             TestFallbackRouting(date, session, variants);
 
@@ -244,6 +257,33 @@ public static class MultiStrategySelfTests
             }
             catch (ArgumentException) { }
 
+            // A fresh combined-run replay must use live training-selected
+            // settings/policy, never the old hard-coded strategy IDs.
+            var selectedKinds = Enum.GetValues<MultiStrategyKind>()
+                .ToDictionary(kind => kind, kind =>
+                {
+                    var variant = deepVariants.Last(v => v.Kind == kind);
+                    var sample = new MultiStrategyTrade(date, kind, variant.Id,
+                        session.Contract, TradeDirection.Long,
+                        session.Rth[40].T, session.Rth[41].T,
+                        100m, 102m, 110m, "target");
+                    var score = MultiScore.From(new[] { sample });
+                    return new MultiStrategyRunner.Choice(variant, score,
+                        new Dictionary<DateOnly, MultiStrategyTrade>(), score.Net,
+                        score, score);
+                });
+            var dynamicPolicy = new MultiPortfolioPolicy(
+                MultiPortfolioMode.Single, MultiStrategyKind.MorningMomentum);
+            var fresh = HistoricalReplayRunner.FromSelection(
+                date, date, selectedKinds, dynamicPolicy);
+            Ensure(fresh.Choices.Count == 19 &&
+                   fresh.SelectedPolicy == dynamicPolicy &&
+                   fresh.Choices.All(x =>
+                       x.Value.Variant.Id == selectedKinds[x.Key].Variant.Id) &&
+                   fresh.Choices[MultiStrategyKind.MorningVwapReversion]
+                       .Variant.ExitMode == MultiExitMode.TrailingStop,
+                "Combined replay must capture freshly optimized exit settings and router.");
+
             // Regression of frozen historical replay: no SQL, no new fit on
             // historical candles, no file outputs, full weekly reconciliation.
             var frozen = HistoricalReplayRunner.BuildPlan(
@@ -298,6 +338,77 @@ public static class MultiStrategySelfTests
         {
             if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
         }
+    }
+
+
+    private static void TestTrailingStops(MultiSession session)
+    {
+        // Synthetic 1-minute bars with an intentionally ambiguous activation
+        // minute: a trail computed from the high of minute 31 must NOT be
+        // executed against that same minute's low.
+        var bars = session.Rth.Select(bar => bar with { C = new Candle {
+            T = bar.T, O = 100m, H = 100.25m, L = 99.75m,
+            C = 100m, V = 100
+        } }).ToArray();
+        void Set(int i, decimal open, decimal high, decimal low, decimal close)
+        {
+            bars[i] = bars[i] with { C = new Candle {
+                T = bars[i].T, O = open, H = high,
+                L = low, C = close, V = 100
+            } };
+        }
+        Set(31, 100.25m, 102m, 100m, 101.75m);
+        Set(32, 101.75m, 102m, 101.25m, 101.5m);
+        Set(33, 101.5m, 101.75m, 100.75m, 101m);
+        var fixedVariant = new MultiStrategyVariant(
+            99001, MultiStrategyKind.MorningVwapReversion,
+            10, 0.5m, 1m, 1m, 0m, 0, 0m, EconomicEventRule.Off);
+        var tight = fixedVariant with {
+            Id = 99002, RewardRisk = 0m,
+            ExitMode = MultiExitMode.TrailingStop,
+            TrailActivationR = 1m, TrailAtrMultiple = 0.5m
+        };
+        var wide = tight with { Id = 99003, TrailAtrMultiple = 1m };
+        var delayed = tight with { Id = 99004, TrailActivationR = 2.5m };
+        MultiStrategyTrade? Trade(MultiStrategyVariant v) =>
+            MultiStrategyEngine.SimulateBracket(v, session, bars,
+                30, 35, TradeDirection.Long, 1m);
+
+        var hard = Trade(fixedVariant);
+        var t = Trade(tight);
+        var w = Trade(wide);
+        var d = Trade(delayed);
+        Ensure(hard is { ExitReason: "target", Exit: 101m } &&
+               hard.ExitAt == bars[31].T.AddMinutes(1),
+            "Fixed profit target must exit on target hit.");
+        Ensure(t is { ExitReason: "trailing_stop", Exit: 101.5m } &&
+               t.ExitAt == bars[32].T.AddMinutes(1),
+            "Tight trailing stop only activates at bar 31 CLOSE and fills on bar 32.");
+        Ensure(w is { ExitReason: "trailing_stop", Exit: 101m } &&
+               w.ExitAt == bars[33].T.AddMinutes(1),
+            "Wider ATR trail must survive the earlier pullback.");
+        Ensure(d is { ExitReason: "time_exit" },
+            "Delayed activation must not create a trailing stop before threshold.");
+
+        var shortBars = bars.Select(bar => bar with { C = new Candle {
+            T = bar.T, O = 100m, H = 100.25m, L = 99.75m,
+            C = 100m, V = 100
+        } }).ToArray();
+        shortBars[31] = shortBars[31] with { C = new Candle {
+            T = shortBars[31].T, O = 99.75m, H = 100m, L = 98m,
+            C = 98.25m, V = 100
+        } };
+        shortBars[32] = shortBars[32] with { C = new Candle {
+            T = shortBars[32].T, O = 98.25m, H = 98.75m, L = 98m,
+            C = 98.5m, V = 100
+        } };
+        var shortTrade = MultiStrategyEngine.SimulateBracket(tight,
+            session, shortBars, 30, 35, TradeDirection.Short, 1m);
+        Ensure(shortTrade is { ExitReason: "trailing_stop", Exit: 98.5m } &&
+               shortTrade.ExitAt == shortBars[32].T.AddMinutes(1),
+            "Short trailing stops must trail the LOW and only fill on the next bar.");
+
+        Console.WriteLine("PASS: fixed target vs early/delayed, wide/tight and short trailing exits.");
     }
 
     private static void TestFallbackRouting(

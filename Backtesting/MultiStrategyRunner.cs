@@ -64,7 +64,21 @@ public static class MultiStrategyRunner
 
     public static int Run(
         List<PriceBar> active, List<PriceBar> all, string root,
-        MultiSearchProfile profile = MultiSearchProfile.Deep)
+        MultiSearchProfile profile = MultiSearchProfile.Deep) =>
+        RunCore(active, all, root, profile, null);
+
+    // The combined pipeline captures the ACTUAL last-fold training winners
+    // and routing policy. This avoids re-fitting or stale pinned variant IDs.
+    internal static int RunAndCapture(
+        List<PriceBar> active, List<PriceBar> all, string root,
+        MultiSearchProfile profile,
+        Action<HistoricalReplayRunner.FrozenPlan> onSelected) =>
+        RunCore(active, all, root, profile, onSelected);
+
+    private static int RunCore(
+        List<PriceBar> active, List<PriceBar> all, string root,
+        MultiSearchProfile profile,
+        Action<HistoricalReplayRunner.FrozenPlan>? onSelected)
     {
         // No report artifacts are written. The SQL run reports results in the terminal.
         Console.WriteLine();
@@ -167,6 +181,7 @@ public static class MultiStrategyRunner
             }
         }
 
+        HistoricalReplayRunner.FrozenPlan? lastFoldPlan = null;
         var chosenOos = new List<(int Fold, MultiStrategyTrade Trade)>();
         var bestOriginalRouterOos = new List<MultiStrategyTrade>();
         var bestFallbackRouterOos = new List<MultiStrategyTrade>();
@@ -271,6 +286,12 @@ public static class MultiStrategyRunner
                 .ThenBy(x => x.Training.Score.Drawdown)
                 .ThenBy(x => x.Policy.Description, StringComparer.Ordinal)
                 .First();
+
+            if (onSelected is not null && foldIndex == folds.Length - 1)
+                lastFoldPlan = HistoricalReplayRunner.FromSelection(
+                    sessions[fold.TrainingStart].Day,
+                    sessions[fold.TrainingEnd - 1].Day,
+                    winners, chosenPolicy.Policy);
 
             var oos = EvaluatePortfolio(chosenPolicy.Policy, winners, sessions,
                 fold.TestStart, fold.TestEnd);
@@ -475,6 +496,9 @@ public static class MultiStrategyRunner
                     ", trades " + selected.Score.Trades +
                     ", settings: " + selected.Variant.Parameters);
         Console.WriteLine("Console-only reporting: no CSV or text reports created; existing files are untouched.");
+        if (onSelected is not null)
+            onSelected(lastFoldPlan ?? throw new InvalidOperationException(
+                "No last-fold plan was selected for historical replay."));
         return 0;
     }
 

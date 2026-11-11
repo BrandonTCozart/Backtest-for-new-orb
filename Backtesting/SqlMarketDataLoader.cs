@@ -7,8 +7,9 @@ namespace Backtest_for_new_orb;
 /// <summary>
 /// Read-only SQL candle source matching orb-analysis/Services/MarketDataRepository.
 /// The source table is named MES_DATA but contains ES contracts.
-/// An empty symbol selects one active ES contract per Eastern date for trading,
-/// while retaining every contract's minute bars for the strategy's 7-day lookback.
+/// With an empty symbol, select the active ES contract from the most recently
+/// COMPLETED regular session, never from the eventual volume of the trade day.
+/// All raw contract bars remain available for causal lookbacks.
 /// </summary>
 public sealed record SqlMarketDataSet(List<PriceBar> ActiveBars, List<PriceBar> AllContractBars);
 
@@ -56,7 +57,7 @@ public static class SqlMarketDataLoader
         var allContractBars = new List<PriceBar>();
         var dayBars = new List<PriceBar>();
         DateOnly? currentDay = null;
-        string? lastSelectedSymbol = null;
+        var selector = new CausalContractSelector();
         var selectedDays = 0;
 
         await using var connection = new SqlConnection(connectionString);
@@ -139,7 +140,8 @@ public static class SqlMarketDataLoader
 
         Console.WriteLine(
             symbol.Length == 0
-                ? $"SQL auto-selected the most active ES contract on {selectedDays:N0} calendar dates."
+                ? $"SQL causally selected ES contracts from completed RTH volume on {selectedDays:N0} calendar dates (no same-day hindsight); " +
+                  $"skipped {selector.BootstrapDays:N0} bootstrap/stale-source days."
                 : $"SQL selected exact ES contract '{symbol}'.");
         Console.WriteLine($"SQL source rows (all contracts): {allContractBars.Count:N0}; " +
                           $"active-contract candle rows: {result.Count:N0}; " +
@@ -149,52 +151,112 @@ public static class SqlMarketDataLoader
         void FlushDay(DateOnly day)
         {
             if (dayBars.Count == 0) return;
-
-            var groups = dayBars
-                .GroupBy(bar => bar.Contract, StringComparer.OrdinalIgnoreCase)
-                .Select(g => new
-                {
-                    Name = g.Key,
-                    Bars = g.OrderBy(b => b.T).ToArray(),
-                    RthBars = g.Count(b => IsRegularTradingHour(b.T)),
-                    RthVolume = g.Where(b => IsRegularTradingHour(b.T))
-                        .Sum(b => (decimal)Math.Max(0L, b.C.V)),
-                    AllVolume = g.Sum(b => (decimal)Math.Max(0L, b.C.V))
-                });
-            var winner = groups
-                .OrderByDescending(g => g.RthVolume)
-                .ThenByDescending(g => g.RthBars)
-                .ThenByDescending(g => g.AllVolume)
-                .ThenBy(g => g.Name, StringComparer.OrdinalIgnoreCase)
-                .First();
-
-            if (symbol.Length == 0 && !string.Equals(
-                    lastSelectedSymbol, winner.Name, StringComparison.OrdinalIgnoreCase))
+            if (symbol.Length == 0)
             {
-                Console.WriteLine(
-                    $"SQL selected contract {winner.Name} beginning {day:yyyy-MM-dd} " +
-                    $"(regular-session volume {winner.RthVolume:N0}).");
-                lastSelectedSymbol = winner.Name;
+                if (selector.SelectDay(day, dayBars, result)) selectedDays++;
+                return;
             }
 
-            DateTimeOffset? lastMinute = null;
-            foreach (var bar in winner.Bars)
+            DateTimeOffset? last = null;
+            foreach (var bar in dayBars.Where(b =>
+                         string.Equals(b.Contract, symbol, StringComparison.OrdinalIgnoreCase)))
             {
-                if (lastMinute is { } previous && bar.T <= previous)
-                    throw new FormatException(
-                        $"Duplicate or non-increasing {tableName} minute for symbol " +
-                        $"'{winner.Name}' at {bar.T:O}; check SQL table for duplicates.");
+                if (last is not null && bar.T <= last.Value)
+                    throw new FormatException("Duplicate or decreasing minute for " +
+                        symbol + " at " + bar.T);
                 result.Add(bar);
-                lastMinute = bar.T;
+                last = bar.T;
             }
-
-            selectedDays++;
+            if (last is not null) selectedDays++;
         }
 
-        static bool IsRegularTradingHour(DateTimeOffset timestamp)
+    }
+
+    private static bool IsRegularTradingHour(DateTimeOffset timestamp)
+    {
+        var et = MarketTime.ToEastern(timestamp).TimeOfDay;
+        return et >= new TimeSpan(9, 30, 0) && et < new TimeSpan(16, 0, 0);
+    }
+
+    // A calendar day can straddle TWO trading sessions. Bars before 16:00
+    // belong to the prior completed-session contract; bars from 18:00
+    // belong to the NEXT session and may use today's 16:00 volume summary.
+    // Never silently switch to whichever contract later had more activity.
+    internal sealed class CausalContractSelector
+    {
+        private string? _selectedContract;
+        private DateOnly? _referenceDay;
+        internal int BootstrapDays { get; private set; }
+
+        internal bool SelectDay(DateOnly day, IReadOnlyList<PriceBar> bars,
+            List<PriceBar> output)
         {
-            var et = MarketTime.ToEastern(timestamp).TimeOfDay;
-            return et >= new TimeSpan(9, 30, 0) && et < new TimeSpan(16, 0, 0);
+            var groups = bars.GroupBy(b => b.Contract,
+                    StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.OrderBy(x => x.T).ToArray(),
+                    StringComparer.OrdinalIgnoreCase);
+
+            // Today's pre-16:00 bars use ONLY the past full RTH day's
+            // selected contract. If unavailable, skip rather than peek at
+            // the later today's volume or first future signal.
+            var before = _referenceDay is { } prior &&
+                         day.DayNumber - prior.DayNumber <= 7
+                ? _selectedContract : null;
+
+            // After 16:00 ET, today's completed RTH is already known and may
+            // set the next (18:00 ET onward) session's contract.
+            var current = groups.Select(pair =>
+            {
+                var rth = pair.Value.Where(b =>
+                    IsRegularTradingHour(b.T)).ToArray();
+                var start = MarketTime.ToUtc(day, new TimeOnly(9, 30));
+                var valid = rth.Length == 390 &&
+                    rth[0].T == start &&
+                    rth[^1].T == start.AddMinutes(389) &&
+                    rth.Zip(rth.Skip(1), (a, b) =>
+                        b.T == a.T.AddMinutes(1)).All(x => x);
+                return (Contract: pair.Key, Valid: valid,
+                    RthVolume: rth.Sum(b => (decimal)Math.Max(0L, b.C.V)));
+            }).Where(x => x.Valid)
+              .OrderByDescending(x => x.RthVolume)
+              .ThenBy(x => x.Contract, StringComparer.OrdinalIgnoreCase)
+              .FirstOrDefault();
+
+            var after = current.Valid ? current.Contract : before;
+            if (current.Valid)
+            {
+                if (!string.Equals(_selectedContract, after,
+                        StringComparison.OrdinalIgnoreCase))
+                    Console.WriteLine("SQL causal contract roll: " + after +
+                        " from " + day + " completed 16:00 ET RTH volume; " +
+                        "effective from 18:00 ET.");
+                _selectedContract = after;
+                _referenceDay = day;
+            }
+
+            if (before is null) BootstrapDays++;
+            var preCount = output.Count;
+            foreach (var bar in bars)
+            {
+                var t = MarketTime.ToEastern(bar.T).TimeOfDay;
+                var candidate = t >= new TimeSpan(18, 0, 0) ? after : before;
+                if (candidate is not null &&
+                    string.Equals(bar.Contract, candidate,
+                        StringComparison.OrdinalIgnoreCase))
+                    output.Add(bar);
+            }
+            // SQL is ordered by ts_event,symbol, so the selected subset
+            // must remain strictly increasing and duplicate-free.
+            DateTimeOffset? last = null;
+            for (var i = preCount; i < output.Count; i++)
+            {
+                if (last is not null && output[i].T <= last.Value)
+                    throw new FormatException("Duplicate selected minute at " +
+                        output[i].T + "; check SQL contract bars.");
+                last = output[i].T;
+            }
+            return output.Count > preCount;
         }
     }
+
 }

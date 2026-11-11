@@ -168,6 +168,12 @@ public sealed class MultiSession
     public required decimal AfternoonAtr { get; init; } // 13:00 ET
     public required decimal FirstHourOvernightMove { get; init; } // 19:00 ET
     public required decimal FirstHourOvernightAtr { get; init; } // 19:00 ET
+
+    // Immutable, point-in-time regime observations. Future candles can never
+    // change features already visible at the slot's decision timestamp.
+    public RegimeObservation? OvernightRegime { get; init; }
+    public RegimeObservation? MorningRegime { get; init; }
+    public RegimeObservation? AfternoonRegime { get; init; }
 }
 
 public sealed record MultiStrategyTrade(
@@ -299,7 +305,19 @@ public static class MultiStrategyData
                 AfternoonAtr = rthMetrics.Atr14[209],
                 FirstHourOvernightMove = nightBars is null ? 0m :
                     nightBars[59].C.C - nightBars[0].C.O,
-                FirstHourOvernightAtr = nightMetrics is null ? 0m : nightMetrics.Atr14[59]
+                FirstHourOvernightAtr = nightMetrics is null ? 0m : nightMetrics.Atr14[59],
+                OvernightRegime = MarketRegimeEngine.Observe(
+                    MultiStrategySlot.Overnight, nightBars, nightMetrics,
+                    hasPrior ? prior!.Overnight : null,
+                    hasPrior ? prior!.OvernightIndicators : null),
+                MorningRegime = MarketRegimeEngine.Observe(
+                    MultiStrategySlot.Morning, rth, rthMetrics,
+                    hasPrior ? prior!.Rth : null,
+                    hasPrior ? prior!.RthIndicators : null),
+                AfternoonRegime = MarketRegimeEngine.Observe(
+                    MultiStrategySlot.Afternoon, rth, rthMetrics,
+                    hasPrior ? prior!.Rth : null,
+                    hasPrior ? prior!.RthIndicators : null)
             });
         }
 

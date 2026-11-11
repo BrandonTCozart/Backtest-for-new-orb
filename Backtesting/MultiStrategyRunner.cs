@@ -32,20 +32,30 @@ public sealed record MultiScore(
     }
 }
 
-public enum MultiPortfolioMode { Single, FixedSessions, AdaptiveRegimes }
+public enum MultiPortfolioMode { Single, FixedSessions, AdaptiveRegimes, RegimeAware }
 
 public sealed record MultiPortfolioPolicy(
     MultiPortfolioMode Mode, MultiStrategyKind? SingleStrategy = null,
     decimal NightThreshold = 1m, decimal OrbThreshold = 2m,
     decimal MorningThreshold = 1m, decimal AfternoonThreshold = 2m,
-    bool UseFallbacks = false)
+    bool UseFallbacks = false,
+    decimal RegimeTrendAtr = 1.5m,
+    decimal RegimeMinEfficiency = 0.2m,
+    decimal RegimeMaxVolatility = 2m,
+    decimal RegimeMinLiquidity = 0.6m)
 {
     public string Description => (Mode switch
     {
         MultiPortfolioMode.Single => "Single_" + SingleStrategy,
         MultiPortfolioMode.FixedSessions => "Fixed_best_per_session",
-        _ => "Adaptive_night" + NightThreshold + "_orb" + OrbThreshold +
-             "_morning" + MorningThreshold + "_afternoon" + AfternoonThreshold
+        MultiPortfolioMode.AdaptiveRegimes =>
+            "Adaptive_night" + NightThreshold + "_orb" + OrbThreshold +
+            "_morning" + MorningThreshold + "_afternoon" + AfternoonThreshold,
+        MultiPortfolioMode.RegimeAware =>
+            "Regime_v1_trend" + RegimeTrendAtr +
+            "_eff" + RegimeMinEfficiency +
+            "_vol" + RegimeMaxVolatility + "_liq" + RegimeMinLiquidity,
+        _ => throw new ArgumentOutOfRangeException(nameof(Mode))
     }) + (UseFallbacks ? "_fallback" : "");
 }
 
@@ -315,8 +325,8 @@ public static class MultiStrategyRunner
                 summary.Add(reportLine);
             }
 
-            // Search single-strategy, fixed-slot and 16 adaptive policies using
-            // only the training history. Adaptive routing uses pre-session data.
+            // Search single, fixed, legacy adaptive and point-in-time regime
+            // policies. All router thresholds are selected on TRAINING only.
             var candidates = new List<MultiPortfolioPolicy>();
             foreach (var kind in winners.Keys)
                 candidates.Add(new MultiPortfolioPolicy(MultiPortfolioMode.Single, kind));
@@ -334,6 +344,7 @@ public static class MultiStrategyRunner
                 candidates.Add(basePolicy);
                 candidates.Add(basePolicy with { UseFallbacks = true });
             }
+            candidates.AddRange(EnumerateRegimePolicies());
 
             var ranked = new List<(MultiPortfolioPolicy Policy, PortfolioOutcome Training, decimal Robustness)>();
             var mid = fold.TrainingStart + fold.TrainingSessions / 2;
@@ -357,14 +368,29 @@ public static class MultiStrategyRunner
                 .ThenBy(x => x.Policy.Description, StringComparer.Ordinal)
                 .First();
 
+            var bestRegime = ranked
+                .Where(x => x.Policy.Mode == MultiPortfolioMode.RegimeAware)
+                .OrderByDescending(x => x.Robustness)
+                .ThenByDescending(x => x.Training.Score.Net)
+                .ThenBy(x => x.Training.Score.Drawdown)
+                .ThenBy(x => x.Policy.Description, StringComparer.Ordinal)
+                .First();
             if (onSelected is not null && foldIndex == folds.Length - 1)
                 lastFoldPlan = HistoricalReplayRunner.FromSelection(
                     sessions[fold.TrainingStart].Day,
                     sessions[fold.TrainingEnd - 1].Day,
-                    winners, chosenPolicy.Policy);
+                    winners, chosenPolicy.Policy, bestRegime.Policy);
 
             var oos = EvaluatePortfolio(chosenPolicy.Policy, winners, sessions,
                 fold.TestStart, fold.TestEnd);
+            var regimeOos = EvaluatePortfolio(bestRegime.Policy, winners,
+                sessions, fold.TestStart, fold.TestEnd);
+            Console.WriteLine("FOLD_REGIME_COMPARE," + fold.Number + "," +
+                bestRegime.Policy.Description + ",train_net=" +
+                F(bestRegime.Training.Score.Net) + ",oos_net=" +
+                F(regimeOos.Score.Net) + ",oos_trades=" +
+                regimeOos.Score.Trades + ",oos_drawdown=" +
+                F(regimeOos.Score.Drawdown));
             chosenOos.AddRange(oos.Trades.Select(t => (fold.Number, t)));
             if (foldIndex == 0)
                 initialPortfolioTrades.AddRange(chosenPolicy.Training.Trades);
@@ -576,7 +602,8 @@ public static class MultiStrategyRunner
                         "No eligible full-history training configuration for: " +
                         string.Join(", ", missing) +
                         ". Cannot silently skip a family or use forward data for selection.");
-                var policy = SelectTrainingRouter(fullRobust, sessions, 0, sessions.Count);
+                var (policy, bestRegime) = SelectTrainingRouter(
+                    fullRobust, sessions, 0, sessions.Count);
                 Console.WriteLine();
                 Console.WriteLine("=== FULL-HISTORICAL-TRAINING FINAL SELECTION (FROZEN) ===");
                 Console.WriteLine("Training: dbo." + sourceTable + ", " +
@@ -584,6 +611,8 @@ public static class MultiStrategyRunner
                     " (" + sessions.Count + " validated days)");
                 Console.WriteLine("Router selected on historical training only: " +
                     policy.Description);
+                Console.WriteLine("Best regime-aware comparison router (also frozen " +
+                    "from training only): " + bestRegime.Description);
                 foreach (var kind in kinds)
                 {
                     var selected = fullRobust[kind];
@@ -594,7 +623,8 @@ public static class MultiStrategyRunner
                         ",settings=" + selected.Variant.Parameters);
                 }
                 onSelected(HistoricalReplayRunner.FromSelection(
-                    sessions[0].Day, sessions[^1].Day, fullRobust, policy));
+                    sessions[0].Day, sessions[^1].Day, fullRobust,
+                    policy, bestRegime));
             }
             else
                 onSelected(lastFoldPlan ?? throw new InvalidOperationException(
@@ -606,7 +636,8 @@ public static class MultiStrategyRunner
     // The same router choices and robustness ordering used in each
     // chronological training fold, now fitted once on the COMPLETE historical
     // training sample. Evaluation on the later table is strictly downstream.
-    private static MultiPortfolioPolicy SelectTrainingRouter(
+    private static (MultiPortfolioPolicy Selected, MultiPortfolioPolicy BestRegime)
+        SelectTrainingRouter(
         IReadOnlyDictionary<MultiStrategyKind, Choice> winners,
         IReadOnlyList<MultiSession> sessions, int from, int to)
     {
@@ -626,6 +657,7 @@ public static class MultiStrategyRunner
             policies.Add(basis);
             policies.Add(basis with { UseFallbacks = true });
         }
+        policies.AddRange(EnumerateRegimePolicies());
 
         var midpoint = from + (to - from) / 2;
         var scored = policies.Select(policy =>
@@ -638,12 +670,51 @@ public static class MultiStrategyRunner
         }).ToArray();
         var minimum = Math.Max(6, (to - from + 5) / 6);
         var admissible = scored.Where(x => x.Score.Trades >= minimum).ToArray();
-        return (admissible.Length == 0 ? scored : admissible)
+        var ranked = (admissible.Length == 0 ? scored : admissible)
             .OrderByDescending(x => x.Robustness)
             .ThenByDescending(x => x.Score.Net)
             .ThenBy(x => x.Score.Drawdown)
             .ThenBy(x => x.Policy.Description, StringComparer.Ordinal)
-            .First().Policy;
+            .ToArray();
+        var bestRegime = scored
+            .Where(x => x.Policy.Mode == MultiPortfolioMode.RegimeAware &&
+                x.Score.Trades >= minimum)
+            .OrderByDescending(x => x.Robustness)
+            .ThenByDescending(x => x.Score.Net)
+            .ThenBy(x => x.Score.Drawdown)
+            .ThenBy(x => x.Policy.Description, StringComparer.Ordinal)
+            .FirstOrDefault();
+        // If strict no-trade settings produce fewer qualifying trades than
+        // the floor, retain the strongest regime option only as a diagnostic
+        // instead of silently loosening that minimum for the main selection.
+        if (bestRegime.Policy is null)
+            bestRegime = scored
+                .Where(x => x.Policy.Mode == MultiPortfolioMode.RegimeAware)
+                .OrderByDescending(x => x.Robustness)
+                .ThenBy(x => x.Policy.Description, StringComparer.Ordinal)
+                .First();
+        return (ranked[0].Policy, bestRegime.Policy);
+    }
+
+    // The four regime dimensions are intentionally coarse: trying millions
+    // of routing thresholds would make the regime layer itself overfit.
+    // These settings are frozen when training ends; forward data NEVER ranks.
+    private static IEnumerable<MultiPortfolioPolicy> EnumerateRegimePolicies()
+    {
+        foreach (var trend in new[] { 1.25m, 1.75m })
+        foreach (var efficiency in new[] { 0.2m, 0.35m })
+        foreach (var volatility in new[] { 1.75m, 2.5m })
+        foreach (var liquidity in new[] { 0.5m, 0.75m })
+        {
+            var candidate = new MultiPortfolioPolicy(
+                MultiPortfolioMode.RegimeAware,
+                RegimeTrendAtr: trend,
+                RegimeMinEfficiency: efficiency,
+                RegimeMaxVolatility: volatility,
+                RegimeMinLiquidity: liquidity);
+            yield return candidate;
+            yield return candidate with { UseFallbacks = true };
+        }
     }
 
     // Validate portfolio invariants directly on the stitched OOS trades.
@@ -874,6 +945,24 @@ public static class MultiStrategyRunner
                     foreach (var (slot, kinds) in rankedBySlot)
                         preferred[slot] = kinds[0];
                     break;
+                case MultiPortfolioMode.RegimeAware:
+                {
+                    var thresholds = new RegimeThresholds(
+                        policy.RegimeTrendAtr, policy.RegimeMinEfficiency,
+                        policy.RegimeMaxVolatility, policy.RegimeMinLiquidity);
+                    foreach (var slot in Enum.GetValues<MultiStrategySlot>())
+                    {
+                        var state = MarketRegimeEngine.Classify(
+                            MarketRegimeEngine.ForSlot(day, slot), thresholds);
+                        // Do not force a trade on uncertain, unusually volatile,
+                        // thinly traded or insufficient-reference sessions.
+                        if (state == MarketRegime.Trend)
+                            ChooseRegime(slot, trend: true);
+                        else if (state == MarketRegime.Range)
+                            ChooseRegime(slot, trend: false);
+                    }
+                    break;
+                }
                 case MultiPortfolioMode.AdaptiveRegimes:
                     if (day.Overnight is not null && day.FirstHourOvernightAtr > 0m)
                         ChooseRegime(MultiStrategySlot.Overnight,
@@ -915,6 +1004,8 @@ public static class MultiStrategyRunner
                         selected.Trades.ContainsKey(day.Day))
                     .Select(x => (Trade: winners[x.Kind].Trades[day.Day],
                                   x.Priority))
+                    .Where(x => policy.Mode != MultiPortfolioMode.RegimeAware ||
+                        x.Trade.EntryAt >= MarketRegimeEngine.ForSlot(day, slot)!.AvailableAt)
                     .OrderBy(x => x.Trade.EntryAt)
                     .ThenBy(x => x.Priority)
                     .FirstOrDefault();

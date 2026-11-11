@@ -129,6 +129,8 @@ public static class MultiStrategySelfTests
             TestFastScoringAndExitReuse(session);
             TestPriceActionSignals(date, folder);
             TestFallbackRouting(date, session, variants);
+            TestCausalContractRoll();
+            TestMarketRegimeCutoffs(date, folder);
 
             var start = MarketTime.ToUtc(date, new TimeOnly(11, 0));
             var win = new MultiStrategyTrade(date, MultiStrategyKind.MorningMomentum, 1,
@@ -714,6 +716,122 @@ public static class MultiStrategySelfTests
                adaptive.Trades[0].Kind == alternate.Kind &&
                adaptive.FallbackTrades == 1,
             "Adaptive trend-regime strategy must be able to fall back to another morning family.");
+
+        var cautious = MultiStrategyRunner.EvaluatePortfolio(
+            new MultiPortfolioPolicy(MultiPortfolioMode.RegimeAware,
+                UseFallbacks: true), withPrimary, new[] { session }, 0, 1);
+        Ensure(cautious.Score.Trades == 0,
+            "A regime-aware router must not trade without prior as-of reference data.");
+    }
+
+    private static void TestCausalContractRoll()
+    {
+        var monday = new DateOnly(2026, 8, 31);
+        var tuesday = monday.AddDays(1);
+        var wednesday = monday.AddDays(2);
+        var baseBars = new[] { monday, tuesday, wednesday }
+            .SelectMany(CreateFullSession).ToArray();
+        var alternate = baseBars.Select(bar =>
+        {
+            var day = DateOnly.FromDateTime(MarketTime.ToEastern(bar.T).Date);
+            var volume = day == tuesday ? bar.C.V * 100 : Math.Max(1, bar.C.V / 10);
+            return bar with {
+                Contract = "ESZ6",
+                C = new Candle {
+                    T = bar.T, O = bar.C.O, H = bar.C.H,
+                    L = bar.C.L, C = bar.C.C, V = volume
+                }
+            };
+        });
+        var stream = baseBars.Concat(alternate)
+            .OrderBy(bar => bar.T).ThenBy(bar => bar.Contract).ToArray();
+        var selector = new SqlMarketDataLoader.CausalContractSelector();
+        var active = new List<PriceBar>();
+        foreach (var day in stream.GroupBy(bar =>
+                     DateOnly.FromDateTime(MarketTime.ToEastern(bar.T).Date)))
+            selector.SelectDay(day.Key, day.ToArray(), active);
+
+        PriceBar[] Window(DateOnly day, TimeSpan first, TimeSpan last) =>
+            active.Where(b =>
+            {
+                var et = MarketTime.ToEastern(b.T);
+                return DateOnly.FromDateTime(et.Date) == day &&
+                    et.TimeOfDay >= first && et.TimeOfDay < last;
+            }).ToArray();
+
+        var tueRth = Window(tuesday, TimeSpan.FromMinutes(570),
+            TimeSpan.FromHours(16));
+        var tueNight = Window(tuesday, TimeSpan.FromHours(18),
+            TimeSpan.FromHours(24));
+        var wedRth = Window(wednesday, TimeSpan.FromMinutes(570),
+            TimeSpan.FromHours(16));
+        Ensure(Window(monday, TimeSpan.FromMinutes(570),
+                   TimeSpan.FromHours(16)).Length == 0,
+            "No earlier RTH means the first observed morning is bootstrap-only.");
+        Ensure(tueRth.Length == 390 && tueRth.All(b => b.Contract == "ESU6"),
+            "A huge future Tuesday ESZ6 volume spike cannot change Tuesday's "
+            + "09:30 contract chosen from Monday's completed session.");
+        Ensure(tueNight.Length == 360 && tueNight.All(b => b.Contract == "ESZ6") &&
+               wedRth.Length == 390 && wedRth.All(b => b.Contract == "ESZ6"),
+            "A Tuesday close can switch the Tuesday 18:00/Wednesday "
+            + "contract, but not retroactively change Tuesday trades.");
+        Console.WriteLine("PASS: point-in-time contract roll has no future-volume selection.");
+    }
+
+    private static void TestMarketRegimeCutoffs(DateOnly date, string folder)
+    {
+        var previous = date.AddDays(-1);
+        var bars = CreateFullSession(previous).Concat(CreateFullSession(date))
+            .OrderBy(b => b.T).ToList();
+        var baseline = MultiStrategyData.Build(bars, bars, folder);
+        Ensure(baseline.Count == 2, "Regime cutoff fixtures need two complete sessions.");
+        var today = baseline[^1];
+        Ensure(today.OvernightRegime?.HasReference == true &&
+               today.MorningRegime?.HasReference == true &&
+               today.AfternoonRegime?.HasReference == true,
+            "All three slots need completed same-contract reference observations.");
+        Ensure(today.OvernightRegime!.AvailableAt ==
+                   MarketTime.ToUtc(date.AddDays(-1), new TimeOnly(19, 0)) &&
+               today.MorningRegime!.AvailableAt ==
+                   MarketTime.ToUtc(date, new TimeOnly(9, 45)) &&
+               today.AfternoonRegime!.AvailableAt ==
+                   MarketTime.ToUtc(date, new TimeOnly(13, 0)),
+            "No classifier may use any bar that closes after its decision time.");
+
+        var changed = bars.Select(b => b.T == today.Rth[300].T
+            ? b with {
+                C = new Candle {
+                    T = b.T, O = b.C.O, H = b.C.H + 150m,
+                    L = b.C.L, C = b.C.C, V = b.C.V * 100
+                }
+            } : b).ToList();
+        var future = MultiStrategyData.Build(changed, changed, folder)[^1];
+        Ensure(today.OvernightRegime == future.OvernightRegime &&
+               today.MorningRegime == future.MorningRegime &&
+               today.AfternoonRegime == future.AfternoonRegime,
+            "Changing later afternoon candles must not repaint earlier regimes.");
+
+        var thresholds = new RegimeThresholds();
+        var cutoff = today.MorningRegime!.AvailableAt;
+        RegimeObservation State(decimal strength, decimal efficiency,
+            decimal vola, decimal volume, bool hasReference = true) =>
+            new(MultiStrategySlot.Morning, cutoff, hasReference,
+                strength, efficiency, vola, volume);
+        Ensure(MarketRegimeEngine.Classify(State(3m, .5m, 1m, 1m),
+                   thresholds) == MarketRegime.Trend &&
+               MarketRegimeEngine.Classify(State(.2m, .05m, 1m, 1m),
+                   thresholds) == MarketRegime.Range &&
+               MarketRegimeEngine.Classify(State(1.3m, .15m, 1m, 1m),
+                   thresholds) == MarketRegime.Uncertain &&
+               MarketRegimeEngine.Classify(State(3m, .5m, 3m, 1m),
+                   thresholds) == MarketRegime.VolatilityShock &&
+               MarketRegimeEngine.Classify(State(3m, .5m, 1m, .1m),
+                   thresholds) == MarketRegime.ThinLiquidity &&
+               MarketRegimeEngine.Classify(State(3m, .5m, 1m, 1m, false),
+                   thresholds) == MarketRegime.NoReference,
+            "Regime classifier must separate trend, range, uncertainty, "
+            + "volatility shock, thin liquidity and missing reference.");
+        Console.WriteLine("PASS: point-in-time regime cutoffs and no-trade classes.");
     }
 
     private static void TestWeeklyTotals(DateOnly date)

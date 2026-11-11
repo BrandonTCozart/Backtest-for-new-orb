@@ -47,14 +47,16 @@ public static class HistoricalReplayRunner
     internal sealed record FrozenPlan(
         DateOnly TrainingFrom, DateOnly TrainingThrough,
         IReadOnlyDictionary<MultiStrategyKind, FrozenChoice> Choices,
-        MultiPortfolioPolicy? SelectedPolicy = null);
+        MultiPortfolioPolicy? SelectedPolicy = null,
+        MultiPortfolioPolicy? RegimeComparisonPolicy = null);
 
     // Called by the sequential run ONLY after fold 5's optimizer has finished
     // selecting with MES_DATA training P&L. No historical P&L enters this plan.
     internal static FrozenPlan FromSelection(
         DateOnly trainingFrom, DateOnly trainingThrough,
         IReadOnlyDictionary<MultiStrategyKind, MultiStrategyRunner.Choice> chosen,
-        MultiPortfolioPolicy selectedPolicy)
+        MultiPortfolioPolicy selectedPolicy,
+        MultiPortfolioPolicy? regimeComparison = null)
     {
         var kinds = Enum.GetValues<MultiStrategyKind>();
         if (kinds.Any(kind => !chosen.ContainsKey(kind)))
@@ -64,7 +66,8 @@ public static class HistoricalReplayRunner
         return new FrozenPlan(trainingFrom, trainingThrough,
             chosen.ToDictionary(x => x.Key, x => new FrozenChoice(
                 x.Value.Variant, x.Value.Score, x.Value.Early,
-                x.Value.Late, x.Value.Robustness)), selectedPolicy);
+                x.Value.Late, x.Value.Robustness)), selectedPolicy,
+            regimeComparison);
     }
 
     // Default run: (1) freshly re-optimize and walk-forward test MES_DATA,
@@ -330,6 +333,28 @@ public static class HistoricalReplayRunner
             selectedPolicy with { UseFallbacks = true }, choices,
             sessions, 0, sessions.Count);
         var allOos = original.Trades.OrderBy(t => t.EntryAt).ToArray();
+        var regimeComparison = plan.RegimeComparisonPolicy is { } comparison
+            ? MultiStrategyRunner.EvaluatePortfolio(comparison, choices,
+                sessions, 0, sessions.Count)
+            : null;
+
+        if (plan.RegimeComparisonPolicy is { } comparisonPolicy)
+        {
+            Console.WriteLine();
+            Console.WriteLine("=== FROZEN POINT-IN-TIME REGIME AUDIT ===");
+            Console.WriteLine("REPLAY_REGIME_AUDIT,slot,regime,session_count");
+            var thresholds = new RegimeThresholds(
+                comparisonPolicy.RegimeTrendAtr,
+                comparisonPolicy.RegimeMinEfficiency,
+                comparisonPolicy.RegimeMaxVolatility,
+                comparisonPolicy.RegimeMinLiquidity);
+            foreach (var slot in Enum.GetValues<MultiStrategySlot>())
+                foreach (var group in sessions.GroupBy(day =>
+                    MarketRegimeEngine.Classify(
+                        MarketRegimeEngine.ForSlot(day, slot), thresholds)))
+                    Console.WriteLine("REPLAY_REGIME_AUDIT," + slot + "," +
+                        group.Key + "," + group.Count());
+        }
 
         Console.WriteLine();
         Console.WriteLine(forwardHoldout
@@ -341,6 +366,14 @@ public static class HistoricalReplayRunner
                 F(outcome.Score.Net) + "," + outcome.Score.Trades + "," +
                 F(outcome.Score.WinRate) + "," + F(outcome.Score.Drawdown) + "," +
                 outcome.FallbackTrades);
+        if (regimeComparison is not null)
+            Console.WriteLine("REPLAY_REGIME_COMPARE," +
+                regimeComparison.Policy.Description + "," +
+                F(regimeComparison.Score.Net) + "," +
+                regimeComparison.Score.Trades + "," +
+                F(regimeComparison.Score.WinRate) + "," +
+                F(regimeComparison.Score.Drawdown) + "," +
+                regimeComparison.FallbackTrades);
 
         // In forward mode all evaluation trades are strictly later than training.
         Console.WriteLine();
@@ -365,6 +398,8 @@ public static class HistoricalReplayRunner
             Report(kind.ToString(), individual[kind]);
         Report("SelectedPortfolio", allOos);
         Report("FallbackPortfolio", fallback.Trades);
+        if (regimeComparison is not null)
+            Report("RegimeComparison", regimeComparison.Trades);
 
         Console.WriteLine();
         Console.WriteLine(forwardHoldout
@@ -375,6 +410,8 @@ public static class HistoricalReplayRunner
             x => (IEnumerable<MultiStrategyTrade>)x.Value);
         yearlySources["SelectedPortfolio"] = allOos;
         yearlySources["FallbackPortfolio"] = fallback.Trades;
+        if (regimeComparison is not null)
+            yearlySources["RegimeComparison"] = regimeComparison.Trades;
         var years = sessions.Select(x => x.Day.Year).Distinct().OrderBy(x => x).ToArray();
         foreach (var (name, allTrades) in yearlySources)
             foreach (var year in years)
@@ -408,6 +445,20 @@ public static class HistoricalReplayRunner
             Console.WriteLine("WEEKLY_REPLAY," + Day(row.WeekStart) + "," +
                 Day(row.WeekEnd) + ",FallbackPortfolio," +
                 F(row.Net) + "," + F(row.Cumulative) + "," + row.Trades);
+        }
+        if (regimeComparison is not null)
+        {
+            var regimeWeeks = MultiStrategyRunner.BuildWeeklyOosRows(
+                fallbackMap, regimeComparison.Trades,
+                sessions[0].Day, sessions[^1].Day)
+                .Where(x => x.Strategy == "SelectedPortfolio").ToArray();
+            if (regimeWeeks.Sum(x => x.Net) != regimeComparison.Score.Net)
+                throw new InvalidOperationException(
+                    "Regime comparison weekly P&L does not reconcile.");
+            foreach (var row in regimeWeeks)
+                Console.WriteLine("WEEKLY_REPLAY," + Day(row.WeekStart) + "," +
+                    Day(row.WeekEnd) + ",RegimeComparison," +
+                    F(row.Net) + "," + F(row.Cumulative) + "," + row.Trades);
         }
 
         foreach (var (kind, trades) in individual)

@@ -13,53 +13,15 @@ public static class OptimizationEngine
     private readonly record struct EntryKey(
         DateOnly Day, TimeSpan Cutoff, decimal RangeMin, decimal RangeMax,
         VwapRule Vwap, decimal BreakoutPoints, decimal VolumeMultiplier, bool Retest);
-    // Mutable ORB entry/trade caches must belong to individual CPU workers,
-    // otherwise concurrent ORB candidates corrupt shared Dictionary state.
-    // The global epoch invalidates ALL thread-local caches when SQL dataset
-    // changes, including thread-pool workers not currently scheduled.
-    private sealed class WorkerCache
-    {
-        internal long Epoch;
-        internal int Candidates;
-        internal readonly Dictionary<TradeKey, SimulatedTrade?> Trades = new();
-        internal readonly Dictionary<EntryKey,
-            (int SignalIndex, TradeDirection Side)?> Entries = new();
-
-        internal void Reset()
-        {
-            Candidates = 0;
-            Entries.Clear();
-            Trades.Clear();
-        }
-    }
-
-    [ThreadStatic] private static WorkerCache? _threadCache;
-    private static long _cacheEpoch = 1;
-    private static WorkerCache GetCache()
-    {
-        var cache = _threadCache ??= new WorkerCache();
-        var epoch = System.Threading.Volatile.Read(ref _cacheEpoch);
-        if (cache.Epoch != epoch)
-        {
-            cache.Reset();
-            cache.Epoch = epoch;
-        }
-        return cache;
-    }
+    private static readonly Dictionary<TradeKey, SimulatedTrade?> TradeCache = new();
+    private static readonly Dictionary<EntryKey, (int SignalIndex, TradeDirection Side)?> EntryCache = new();
 
     // Both caches are scoped to the currently loaded candle dataset.
+    // Restarting a backtest with updated SQL rows must not reuse old outcomes.
     public static void ClearCaches()
     {
-        System.Threading.Interlocked.Increment(ref _cacheEpoch);
-        _ = GetCache();
-    }
-
-    // Prevent per-worker ORB trade caches from growing indefinitely over
-    // years of candles; mirrors the original 1,200-candidate purge cadence.
-    internal static void TrimCurrentWorkerCaches()
-    {
-        var cache = GetCache();
-        if (++cache.Candidates >= 1200) cache.Reset();
+        EntryCache.Clear();
+        TradeCache.Clear();
     }
 
     private sealed record DayOutcome(DateOnly Day, SimulatedTrade? First, SimulatedTrade? Reversal);
@@ -291,11 +253,10 @@ public static class OptimizationEngine
         var key = new EntryKey(day.Day, config.Cutoff, config.Range.Min,
             config.Range.Max, config.Vwap, config.BreakoutPoints,
             config.VolumeMultiplier, config.Retest);
-        var cache = GetCache().Entries;
-        if (cache.TryGetValue(key, out var entry))
+        if (EntryCache.TryGetValue(key, out var entry))
             return entry;
         entry = FindFirstEntry(day, config);
-        cache.Add(key, entry);
+        EntryCache.Add(key, entry);
         return entry;
     }
 
@@ -407,11 +368,10 @@ public static class OptimizationEngine
     {
         var key = new TradeKey(day.Day, signalIndex, side, qty, isMes,
             riskCap, fallbackRisk, isMes ? 0m : esTrailingDistance);
-        var cache = GetCache().Trades;
-        if (cache.TryGetValue(key, out var cached)) return cached;
+        if (TradeCache.TryGetValue(key, out var cached)) return cached;
         var calculated = SimulateTrade(day, logic, signalIndex, side, qty,
             isMes, riskCap, fallbackRisk);
-        cache[key] = calculated;
+        TradeCache[key] = calculated;
         return calculated;
     }
 

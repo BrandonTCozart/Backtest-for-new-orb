@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using Orb;
 
 namespace Backtest_for_new_orb;
@@ -138,12 +137,10 @@ public static class MultiStrategyRunner
             throw new ArgumentOutOfRangeException(nameof(parallelWorkers),
                 "Parallel workers must be 0 (automatic) or 1–32.");
         var workers = parallelWorkers == 0
-            ? Math.Min(32, Math.Max(1, Environment.ProcessorCount - 1))
+            ? Math.Min(8, Math.Max(1, Environment.ProcessorCount - 1))
             : parallelWorkers;
-        Console.WriteLine("Optimizer workers: " + workers + " / " +
-            Environment.ProcessorCount + " available logical CPU cores.");
-        Console.WriteLine("All 19 strategy families, INCLUDING ORB, can now use " +
-            "independent worker caches.");
+        Console.WriteLine("Optimizer workers: " + workers +
+            " (ORB runs sequentially; other strategies use independent worker caches).");
 
         var bestForFold = folds.Select(_ => new Dictionary<MultiStrategyKind, Choice>())
             .ToArray();
@@ -154,15 +151,14 @@ public static class MultiStrategyRunner
         var minimumFull = Math.Max(10, (sessions.Count + 3) / 4);
         MultiStrategyEngine.ClearCaches();
         OptimizationEngine.ClearCaches();
-        // All 19 strategy families now have isolated per-thread caches,
-        // including the original ORB simulator. Only the candidate ranking
-        // merge requires a short lock; all costly simulations run concurrently.
+        // Keep ORB sequential because its mature OptimizationEngine has shared
+        // mutable caches. All other 18 families use thread-local entry/exit
+        // caches and can safely evaluate independent variant IDs concurrently.
+        // A short lock merges ONLY candidate scores/rankings; the expensive
+        // candle simulation and scoring always run outside that lock.
         var selectionLock = new object();
         var progressLock = new object();
         var tested = 0;
-        var elapsed = Stopwatch.StartNew();
-        using var currentProcess = Process.GetCurrentProcess();
-        var initialCpu = currentProcess.TotalProcessorTime;
         void EvaluateCandidate(MultiStrategyVariant variant)
         {
             var trades = MultiStrategyEngine.Generate(variant, sessions, originalOrb);
@@ -219,38 +215,34 @@ public static class MultiStrategyRunner
                 }
             }
 
-            if (variant.Kind == MultiStrategyKind.Orb)
-                OptimizationEngine.TrimCurrentWorkerCaches();
-
             var completed = Interlocked.Increment(ref tested);
             if (completed % 500 == 0)
                 lock (progressLock)
-                {
-                    var wallSeconds = Math.Max(0.001, elapsed.Elapsed.TotalSeconds);
-                    var activeCores = Math.Max(0, 
-                        (currentProcess.TotalProcessorTime - initialCpu).TotalSeconds) /
-                        wallSeconds;
                     Console.WriteLine("Deep multi-strategy grid: " +
                         completed.ToString("N0", Ci) + "/" +
-                        variants.Count.ToString("N0", Ci) +
-                        "; elapsed " + elapsed.Elapsed.ToString(@"hh\:mm\:ss", Ci) +
-                        "; rate " + (completed / wallSeconds).ToString("0.0", Ci) +
-                        " configs/s; avg CPU cores " +
-                        activeCores.ToString("0.0", Ci));
-                }
+                        variants.Count.ToString("N0", Ci));
+            if (variant.Kind == MultiStrategyKind.Orb && completed % 1200 == 0)
+                OptimizationEngine.ClearCaches();
         }
+
+        var firstNonOrb = 0;
+        while (firstNonOrb < variants.Count &&
+               variants[firstNonOrb].Kind == MultiStrategyKind.Orb)
+            firstNonOrb++;
+        for (var i = 0; i < firstNonOrb; i++)
+            EvaluateCandidate(variants[i]);
 
         if (workers == 1)
         {
-            foreach (var variant in variants)
-                EvaluateCandidate(variant);
+            for (var i = firstNonOrb; i < variants.Count; i++)
+                EvaluateCandidate(variants[i]);
         }
         else
         {
-            // Dynamic contiguous partitions of the entire grid (including
-            // ORB), each processed by a thread-local signal/trade cache.
+            // Contiguous chunks favor the per-thread signal/exit cache.
+            // Only read-only session data is shared across parallel workers.
             Parallel.ForEach(
-                Partitioner.Create(0, variants.Count, 256),
+                Partitioner.Create(firstNonOrb, variants.Count, 256),
                 new ParallelOptions { MaxDegreeOfParallelism = workers },
                 range =>
                 {

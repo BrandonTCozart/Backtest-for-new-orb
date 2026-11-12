@@ -305,7 +305,7 @@ public static class MultiStrategySelfTests
             Ensure(focusedStatus == 0 &&
                    focusedReport.Contains("Strategy scope: Focused (") &&
                    focusedReport.Contains("5 strategy types") &&
-                   focusedTotals.Length == 8 && // header + 5 families + 2 portfolios
+                   focusedTotals.Length == 7 && // header + 5 families + selected portfolio
                    focusedTotals.Any(x =>
                        x.StartsWith("TOTAL_PNL,SelectedPortfolio,")) &&
                    !focusedReport.Contains("TOTAL_PNL,MorningMomentum,") &&

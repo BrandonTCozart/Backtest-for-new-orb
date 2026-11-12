@@ -755,6 +755,29 @@ public static class MultiStrategySelfTests
         Ensure(absentTrend.Score.Trades == 0,
             "If no trend-family setup qualifies, skip rather than "
             + "enter a reversal from the opposite regime.");
+        var reversedPrimary = primary with { SignalMode = SignalMode.Reversed };
+        var reversedTrade = laterPrimary with {
+            Side = TradeDirection.Short, Exit = 4998m
+        };
+        var flippedWinners =
+            new Dictionary<MultiStrategyKind, MultiStrategyRunner.Choice>(
+                withPrimary) {
+                    [primary.Kind] = BuildChoice(reversedPrimary, reversedTrade,
+                        new Dictionary<DateOnly, MultiStrategyTrade> {
+                            [day] = reversedTrade
+                        }, 200m)
+                };
+        Ensure(!MultiStrategyRunner.IsTrendStrategy(primary.Kind,
+                   SignalMode.Reversed) &&
+               MultiStrategyRunner.IsTrendStrategy(alternate.Kind,
+                   SignalMode.Reversed),
+            "Reversing signal direction must invert its effective "
+            + "trend-versus-reversion regime classification.");
+        var mismatched = MultiStrategyRunner.EvaluatePortfolio(regimePolicy,
+            flippedWinners, new[] { trendDay }, 0, 1);
+        Ensure(mismatched.Score.Trades == 0,
+            "A reversed momentum setup must not masquerade as trend-following "
+            + "during a detected trend regime.");
     }
 
     private static void TestCausalContractRoll()

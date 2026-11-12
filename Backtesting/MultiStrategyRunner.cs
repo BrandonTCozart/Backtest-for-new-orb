@@ -1074,7 +1074,7 @@ public static class MultiStrategyRunner
         var rankedByRegime = winners.Values
             .Where(c => c.Score.Net > 0m)
             .GroupBy(c => (Slot: c.Variant.Slot,
-                           Trend: IsTrendStrategy(c.Variant.Kind)))
+                           Trend: IsTrendStrategy(c.Variant.Kind, c.Variant.SignalMode)))
             .ToDictionary(g => g.Key, g => g
                 .OrderByDescending(c => c.Robustness)
                 .ThenByDescending(c => c.Score.Net)
@@ -1083,7 +1083,7 @@ public static class MultiStrategyRunner
         var bestByRegime = winners.Values
             .Where(c => c.Score.Net > 0m)
             .GroupBy(c => (Slot: c.Variant.Slot,
-                           Trend: IsTrendStrategy(c.Variant.Kind)))
+                           Trend: IsTrendStrategy(c.Variant.Kind, c.Variant.SignalMode)))
             .ToDictionary(g => g.Key, g => g
                 .OrderByDescending(c => c.Robustness)
                 .ThenByDescending(c => c.Score.Net)
@@ -1169,7 +1169,8 @@ public static class MultiStrategyRunner
                 {
                     var options = policy.Mode == MultiPortfolioMode.RegimeAware
                         ? rankedByRegime.GetValueOrDefault(
-                            (slot, IsTrendStrategy(primary)), [])
+                            (slot, IsTrendStrategy(primary,
+                                winners[primary].Variant.SignalMode)), [])
                         : rankedBySlot.GetValueOrDefault(slot, []);
                     ranked.AddRange(options.Where(kind => kind != primary));
                 }
@@ -1212,16 +1213,24 @@ public static class MultiStrategyRunner
     // Directional breakout/extension/retest families are trend-following;
     // bounce, liquidity-sweep, Fibonacci retracement and VWAP reversion
     // are range/reversal candidates. Morning/afternoon are independent.
-    private static bool IsTrendStrategy(MultiStrategyKind kind) => kind is
-        MultiStrategyKind.Orb or
+    // Reversing a trend signal turns it into a counter-trend hypothesis,
+    // and reversing a reversion signal turns it into a trend hypothesis.
+    // Disabled configurations never reach the regime winner sets.
+    internal static bool IsTrendStrategy(MultiStrategyKind kind,
+        SignalMode mode = SignalMode.Original)
+    {
+        var native = kind is
+            MultiStrategyKind.Orb or
         MultiStrategyKind.MorningMomentum or MultiStrategyKind.AfternoonMomentum or
         MultiStrategyKind.OvernightMomentum or
         MultiStrategyKind.MorningSupportResistanceBreakout or
         MultiStrategyKind.AfternoonSupportResistanceBreakout or
         MultiStrategyKind.MorningBreakoutRetest or
         MultiStrategyKind.AfternoonBreakoutRetest or
-        MultiStrategyKind.MorningFibonacciExtension or
-        MultiStrategyKind.AfternoonFibonacciExtension;
+            MultiStrategyKind.MorningFibonacciExtension or
+            MultiStrategyKind.AfternoonFibonacciExtension;
+        return mode == SignalMode.Reversed ? !native : native;
+    }
 
     private static bool HigherWinRate(MultiScore a, int idA, MultiScore b, int idB)
     {

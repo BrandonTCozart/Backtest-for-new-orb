@@ -161,6 +161,7 @@ public static class MultiStrategySelfTests
             TestFallbackRouting(date, session, variants);
             TestCausalContractRoll();
             TestMarketRegimeCutoffs(date, folder);
+            TestAdaptiveCandlestickCausality(date, folder);
 
             var start = MarketTime.ToUtc(date, new TimeOnly(11, 0));
             var win = new MultiStrategyTrade(date, MultiStrategyKind.MorningMomentum, 1,
@@ -525,6 +526,48 @@ public static class MultiStrategySelfTests
         }
     }
 
+
+    private static void TestAdaptiveCandlestickCausality(DateOnly date, string folder)
+    {
+        var bars = CreateFullSession(date);
+        var baseline = MultiStrategyData.Build(bars, bars, folder).Single();
+        var stamp = baseline.Rth[40].T;
+        var raw = baseline.Rth[40].C;
+        var lowerWick = new Candle {
+            T = stamp, O = raw.C + 1m, C = raw.C + 2m,
+            H = raw.C + 2m, L = raw.C - 3m, V = raw.V
+        };
+        var modified = bars.Select(x => x.T == stamp
+            ? x with { C = lowerWick } : x).ToList();
+        var session = MultiStrategyData.Build(modified, modified, folder).Single();
+        var trade = new MultiStrategyTrade(date,
+            MultiStrategyKind.MorningVwapReversion, 101, session.Contract,
+            TradeDirection.Long, session.Rth[41].T,
+            session.Rth[42].T, raw.C, raw.C + 2m, 300m, "target");
+        Ensure(AdaptiveConfigurationEngine.CandlePass(session, trade,
+                   CandleFeatureRule.RejectionOrEngulfing),
+               "Known completed lower-wick rejection must pass long confirmation.");
+        Ensure(!AdaptiveConfigurationEngine.CandlePass(session, trade with {
+                   Side = TradeDirection.Short },
+                   CandleFeatureRule.RejectionOrEngulfing),
+               "The same bullish wick must not confirm a short trade.");
+        var futureStamp = session.Rth[140].T;
+        var futureChanged = modified.Select(x => x.T == futureStamp
+            ? x with { C = new Candle {
+                T = x.T, O = x.C.O, H = x.C.H + 100m,
+                L = x.C.L - 100m, C = x.C.C, V = x.C.V * 10
+            } } : x).ToList();
+        var after = MultiStrategyData.Build(
+            futureChanged, futureChanged, folder).Single();
+        Ensure(AdaptiveConfigurationEngine.CandlePass(after, trade,
+                   CandleFeatureRule.RejectionOrEngulfing) &&
+               AdaptiveConfigurationEngine.State(session, MultiStrategySlot.Morning) ==
+                   AdaptiveConfigurationEngine.State(after, MultiStrategySlot.Morning),
+               "Later candles must not alter an already completed signal " +
+               "candle or pre-entry regime.");
+        Console.WriteLine("PASS: causal wick/engulfing confirmation and " +
+            "pre-entry regime cannot observe future candles.");
+    }
 
     private static void TestTrailingStops(MultiSession session)
     {

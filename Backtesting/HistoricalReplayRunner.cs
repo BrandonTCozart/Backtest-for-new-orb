@@ -48,7 +48,8 @@ public static class HistoricalReplayRunner
         DateOnly TrainingFrom, DateOnly TrainingThrough,
         IReadOnlyDictionary<MultiStrategyKind, FrozenChoice> Choices,
         MultiPortfolioPolicy? SelectedPolicy = null,
-        MultiPortfolioPolicy? RegimeComparisonPolicy = null);
+        MultiPortfolioPolicy? RegimeComparisonPolicy = null,
+        AdaptiveConfigurationModel? AdaptiveExperts = null);
 
     // Called by the sequential run ONLY after fold 5's optimizer has finished
     // selecting with MES_DATA training P&L. No historical P&L enters this plan.
@@ -56,7 +57,8 @@ public static class HistoricalReplayRunner
         DateOnly trainingFrom, DateOnly trainingThrough,
         IReadOnlyDictionary<MultiStrategyKind, MultiStrategyRunner.Choice> chosen,
         MultiPortfolioPolicy selectedPolicy,
-        MultiPortfolioPolicy? regimeComparison = null)
+        MultiPortfolioPolicy? regimeComparison = null,
+        AdaptiveConfigurationModel? adaptiveExperts = null)
     {
         var selected = chosen.Keys.OrderBy(k => k).ToArray();
         var all = Enum.GetValues<MultiStrategyKind>();
@@ -70,7 +72,7 @@ public static class HistoricalReplayRunner
             chosen.ToDictionary(x => x.Key, x => new FrozenChoice(
                 x.Value.Variant, x.Value.Score, x.Value.Early,
                 x.Value.Late, x.Value.Robustness)), selectedPolicy,
-            regimeComparison);
+            regimeComparison, adaptiveExperts);
     }
 
     // Default run: (1) freshly re-optimize and walk-forward test MES_DATA,
@@ -79,7 +81,9 @@ public static class HistoricalReplayRunner
     public static async Task<int> RunSequentialAsync(
         string? connectionString, string symbol, string timeZone,
         MultiSearchProfile profile, string root, int parallelWorkers = 0,
-        MultiStrategyScope strategyScope = MultiStrategyScope.Focused)
+        MultiStrategyScope strategyScope = MultiStrategyScope.Focused,
+        AdaptiveConfigurationMode configurationMode =
+            AdaptiveConfigurationMode.AdaptiveCandles)
     {
         Console.WriteLine("=== COMBINED RESEARCH + HISTORICAL VALIDATION ===");
         Console.WriteLine("Step 1/2: walk-forward optimize dbo.MES_DATA using " +
@@ -90,7 +94,8 @@ public static class HistoricalReplayRunner
         var status = MultiStrategyRunner.RunAndCapture(
             recent.ActiveBars, recent.AllContractBars, root, profile,
             plan => selected = plan, parallelWorkers: parallelWorkers,
-            strategyScope: strategyScope);
+            strategyScope: strategyScope,
+            configurationMode: configurationMode);
         if (status != 0) return status;
         if (selected is null)
             throw new InvalidOperationException("No training-selected historical plan.");
@@ -115,7 +120,9 @@ public static class HistoricalReplayRunner
     public static async Task<int> RunHistoricalThenRecentAsync(
         string? connectionString, string symbol, string timeZone,
         MultiSearchProfile profile, string root, int parallelWorkers = 0,
-        MultiStrategyScope strategyScope = MultiStrategyScope.Focused)
+        MultiStrategyScope strategyScope = MultiStrategyScope.Focused,
+        AdaptiveConfigurationMode configurationMode =
+            AdaptiveConfigurationMode.AdaptiveCandles)
     {
         Console.WriteLine("=== HISTORICAL TRAINING -> RECENT FORWARD TEST (NO LIVE ORDERS) ===");
         Console.WriteLine("Step 1/2: " + profile + "-grid " + strategyScope +
@@ -136,7 +143,8 @@ public static class HistoricalReplayRunner
             plan => selected = plan, fitEntireTrainingSample: true,
             sourceTable: "MES_DATA_2020_2025",
             parallelWorkers: parallelWorkers,
-            strategyScope: strategyScope);
+            strategyScope: strategyScope,
+            configurationMode: configurationMode);
         if (status != 0) return status;
         if (selected is null)
             throw new InvalidOperationException(
@@ -322,12 +330,16 @@ public static class HistoricalReplayRunner
         var choices = new Dictionary<MultiStrategyKind, MultiStrategyRunner.Choice>();
         var individual = new Dictionary<MultiStrategyKind, List<MultiStrategyTrade>>();
         var selectedKinds = plan.Choices.Keys.OrderBy(k => k).ToArray();
+        Console.WriteLine("Frozen adaptive configuration experts: " +
+            (plan.AdaptiveExperts?.ExpertCount.ToString() ?? "none (baseline mode)"));
         Console.WriteLine("Replaying " + selectedKinds.Length +
             " frozen strategy families (no omitted family re-optimized).");
         foreach (var kind in selectedKinds)
         {
             var frozen = plan.Choices[kind];
-            var generated = MultiStrategyEngine.Generate(frozen.Variant, sessions, orb);
+            var generated = plan.AdaptiveExperts is null
+                ? MultiStrategyEngine.Generate(frozen.Variant, sessions, orb)
+                : new Dictionary<DateOnly, MultiStrategyTrade>();
             var trades = generated.Values.OrderBy(t => t.EntryAt).ToList();
             individual[kind] = trades;
             choices[kind] = new MultiStrategyRunner.Choice(
@@ -336,6 +348,22 @@ public static class HistoricalReplayRunner
             Console.WriteLine("Frozen " + kind + ": variant " + frozen.Variant.Id +
                 ", original training net $" + F(frozen.Train.Net) +
                 ", parameters " + frozen.Variant.Parameters);
+        }
+
+        if (plan.AdaptiveExperts is not null)
+        {
+            // Pass -1/-1: replay uses FROZEN training scores for router ranking.
+            // Forward-test returns are never used to fit, disable or re-rank.
+            choices = AdaptiveConfigurationEngine.Apply(
+                plan.AdaptiveExperts, choices, sessions, orb, -1, -1);
+            foreach (var kind in selectedKinds)
+                individual[kind] = choices[kind].Trades.Values
+                    .OrderBy(t => t.EntryAt).ToList();
+            foreach (var (kind, states) in plan.AdaptiveExperts.Rules.OrderBy(x => x.Key))
+                foreach (var (state, expert) in states.OrderBy(x => x.Key))
+                    Console.WriteLine("REPLAY_EXPERT," + kind + "," + state +
+                        ",config=" + expert.Variant.Id + ",mode=" +
+                        expert.Variant.SignalMode + ",candle=" + expert.CandleRule);
         }
 
         // No evaluation-table P&L is used to choose strategy or routing priority.

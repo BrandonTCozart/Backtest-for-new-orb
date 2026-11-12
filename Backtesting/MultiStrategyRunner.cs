@@ -69,7 +69,8 @@ public static class MultiStrategyRunner
         MultiStrategyVariant Variant, MultiScore Score,
         IReadOnlyDictionary<DateOnly, MultiStrategyTrade> Trades,
         decimal Robustness, MultiScore Early, MultiScore Late,
-        CurveMetrics Consistency = default);
+        CurveMetrics Consistency = default,
+        bool IsAdaptive = false);
     // Calendar-period consistency is always computed on TRAINING ONLY.
     // Denominators include inactive weeks/months, preventing a one-trade
     // equity curve from looking perfectly consistent.
@@ -93,9 +94,11 @@ public static class MultiStrategyRunner
         List<PriceBar> active, List<PriceBar> all, string root,
         MultiSearchProfile profile = MultiSearchProfile.Deep,
         int parallelWorkers = 0,
-        MultiStrategyScope strategyScope = MultiStrategyScope.Focused) =>
+        MultiStrategyScope strategyScope = MultiStrategyScope.Focused,
+        AdaptiveConfigurationMode configurationMode = AdaptiveConfigurationMode.AdaptiveCandles) =>
         RunCore(active, all, root, profile, null,
-            parallelWorkers: parallelWorkers, strategyScope: strategyScope);
+            parallelWorkers: parallelWorkers, strategyScope: strategyScope,
+            configurationMode: configurationMode);
 
     // The combined pipeline captures the ACTUAL last-fold training winners
     // and routing policy. This avoids re-fitting or stale pinned variant IDs.
@@ -106,9 +109,11 @@ public static class MultiStrategyRunner
         bool fitEntireTrainingSample = false,
         string sourceTable = "MES_DATA",
         int parallelWorkers = 0,
-        MultiStrategyScope strategyScope = MultiStrategyScope.Focused) =>
+        MultiStrategyScope strategyScope = MultiStrategyScope.Focused,
+        AdaptiveConfigurationMode configurationMode = AdaptiveConfigurationMode.AdaptiveCandles) =>
         RunCore(active, all, root, profile, onSelected,
-            fitEntireTrainingSample, sourceTable, parallelWorkers, strategyScope);
+            fitEntireTrainingSample, sourceTable, parallelWorkers, strategyScope,
+            configurationMode);
 
     private static int RunCore(
         List<PriceBar> active, List<PriceBar> all, string root,
@@ -117,7 +122,8 @@ public static class MultiStrategyRunner
         bool fitEntireTrainingSample = false,
         string sourceTable = "MES_DATA",
         int parallelWorkers = 0,
-        MultiStrategyScope strategyScope = MultiStrategyScope.Focused)
+        MultiStrategyScope strategyScope = MultiStrategyScope.Focused,
+        AdaptiveConfigurationMode configurationMode = AdaptiveConfigurationMode.AdaptiveCandles)
     {
         // No report artifacts are written. The SQL run reports results in the terminal.
         Console.WriteLine();
@@ -153,6 +159,8 @@ public static class MultiStrategyRunner
         var kinds = MultiStrategyScopeSelection.Kinds(variants);
         Console.WriteLine("Strategy scope: " + strategyScope + " (" +
             string.Join(", ", kinds) + ")");
+        Console.WriteLine("Configuration selection: " + configurationMode +
+            " (train-only specialists by trend, range, transition).");
         if (strategyScope == MultiStrategyScope.Focused)
             Console.WriteLine("CAUTION: the five-family shortlist was chosen after " +
                 "prior OOS results were examined; this run is research, " +
@@ -186,6 +194,11 @@ public static class MultiStrategyRunner
         var fullProfit = new Dictionary<MultiStrategyKind, Choice>();
         var fullWinRate = new Dictionary<MultiStrategyKind, Choice>();
         var fullRobust = new Dictionary<MultiStrategyKind, Choice>();
+        var adaptivePools = folds.Select(_ =>
+            new Dictionary<(MultiStrategyKind, SignalMode, MultiExitMode), List<Choice>>())
+            .ToArray();
+        var fullAdaptivePool = new Dictionary<
+            (MultiStrategyKind, SignalMode, MultiExitMode), List<Choice>>();
         var eligible = new int[folds.Length];
         var minimumFull = Math.Max(10, (sessions.Count + 3) / 4);
         MultiStrategyEngine.ClearCaches();
@@ -225,6 +238,8 @@ public static class MultiStrategyRunner
                             if (!fullRobust.TryGetValue(variant.Kind, out var current) ||
                                 BetterRobust(candidate, current))
                                 fullRobust[variant.Kind] = candidate;
+                            if (configurationMode != AdaptiveConfigurationMode.Baseline)
+                                AdaptiveConfigurationEngine.Consider(fullAdaptivePool, candidate);
                         }
                     }
                     if (full.Trades >= minimumFull)
@@ -264,6 +279,8 @@ public static class MultiStrategyRunner
                         if (!bestForFold[f].TryGetValue(variant.Kind, out var current) ||
                             BetterRobust(candidate, current))
                             bestForFold[f][variant.Kind] = candidate;
+                        if (configurationMode != AdaptiveConfigurationMode.Baseline)
+                            AdaptiveConfigurationEngine.Consider(adaptivePools[f], candidate);
                     }
                 }
 
@@ -330,6 +347,7 @@ public static class MultiStrategyRunner
             "Date range: " + Day(sessions[0].Day) + " through " + Day(sessions[^1].Day),
             "Complete overnight windows: " + sessions.Count(x => x.Overnight is not null),
             "Profile: " + profile + "; scope: " + strategyScope +
+            "; configuration mode: " + configurationMode +
             "; strategy families: " + kinds.Length +
             "; candidate configurations: " + variants.Count,
             "Training ranks candidates by net P&L adjusted for drawdown and unstable halves.",
@@ -348,7 +366,38 @@ public static class MultiStrategyRunner
         foreach (var foldIndex in Enumerable.Range(0, folds.Length))
         {
             var fold = folds[foldIndex];
-            var winners = bestForFold[foldIndex];
+            var baselineWinners = bestForFold[foldIndex];
+            AdaptiveConfigurationModel? specialistModel = null;
+            Dictionary<MultiStrategyKind, Choice>? plainExperts = null;
+            Dictionary<MultiStrategyKind, Choice>? candleExperts = null;
+            if (configurationMode != AdaptiveConfigurationMode.Baseline)
+            {
+                var plainModel = AdaptiveConfigurationEngine.Select(
+                    baselineWinners, adaptivePools[foldIndex], sessions,
+                    fold.TrainingStart, fold.TrainingEnd, allowCandleFilter: false);
+                plainExperts = AdaptiveConfigurationEngine.Apply(
+                    plainModel, baselineWinners, sessions, originalOrb,
+                    fold.TrainingStart, fold.TrainingEnd);
+                if (configurationMode == AdaptiveConfigurationMode.AdaptiveCandles)
+                {
+                    specialistModel = AdaptiveConfigurationEngine.Select(
+                        baselineWinners, adaptivePools[foldIndex], sessions,
+                        fold.TrainingStart, fold.TrainingEnd, allowCandleFilter: true);
+                    candleExperts = AdaptiveConfigurationEngine.Apply(
+                        specialistModel, baselineWinners, sessions, originalOrb,
+                        fold.TrainingStart, fold.TrainingEnd);
+                }
+                else specialistModel = plainModel;
+            }
+            var winners = configurationMode switch
+            {
+                AdaptiveConfigurationMode.Adaptive => plainExperts!,
+                AdaptiveConfigurationMode.AdaptiveCandles => candleExperts!,
+                _ => baselineWinners
+            };
+            if (specialistModel is not null)
+                Console.WriteLine("FOLD_EXPERTS," + fold.Number + ",mode=" +
+                    configurationMode + ",frozen_routes=" + specialistModel.ExpertCount);
             summary.Add("FOLD " + fold.Number + ": TRAIN " +
                 Day(sessions[fold.TrainingStart].Day) + " through " +
                 Day(sessions[fold.TrainingEnd - 1].Day) + "; TEST " +
@@ -439,10 +488,31 @@ public static class MultiStrategyRunner
                 lastFoldPlan = HistoricalReplayRunner.FromSelection(
                     sessions[fold.TrainingStart].Day,
                     sessions[fold.TrainingEnd - 1].Day,
-                    winners, chosenPolicy.Policy, bestRegime.Policy);
+                    winners, chosenPolicy.Policy, bestRegime.Policy,
+                    specialistModel);
 
             var oos = EvaluatePortfolio(chosenPolicy.Policy, winners, sessions,
                 fold.TestStart, fold.TestEnd);
+            if (configurationMode != AdaptiveConfigurationMode.Baseline)
+            {
+                var baselineRouting = SelectTrainingRouter(
+                    baselineWinners, sessions, fold.TrainingStart, fold.TrainingEnd);
+                var baselineOos = EvaluatePortfolio(
+                    baselineRouting.Selected, baselineWinners, sessions,
+                    fold.TestStart, fold.TestEnd);
+                var plainRouting = SelectTrainingRouter(
+                    plainExperts!, sessions, fold.TrainingStart, fold.TrainingEnd);
+                var plainOos = EvaluatePortfolio(
+                    plainRouting.Selected, plainExperts!, sessions,
+                    fold.TestStart, fold.TestEnd);
+                var candlesNet = configurationMode ==
+                    AdaptiveConfigurationMode.AdaptiveCandles ? oos.Score.Net : plainOos.Score.Net;
+                Console.WriteLine("FOLD_EXPERT_COMPARE," + fold.Number +
+                    ",baseline_net=" + F(baselineOos.Score.Net) +
+                    ",adaptive_net=" + F(plainOos.Score.Net) +
+                    ",candles_net=" + F(candlesNet) +
+                    ",selected=" + configurationMode);
+            }
             var regimeOos = EvaluatePortfolio(bestRegime.Policy, winners,
                 sessions, fold.TestStart, fold.TestEnd);
             Console.WriteLine("FOLD_REGIME_COMPARE," + fold.Number + "," +
@@ -662,8 +732,20 @@ public static class MultiStrategyRunner
                         "No eligible full-history training configuration for: " +
                         string.Join(", ", missing) +
                         ". Cannot silently skip a family or use forward data for selection.");
+                AdaptiveConfigurationModel? frozenExperts = null;
+                IReadOnlyDictionary<MultiStrategyKind, Choice> frozenChoices = fullRobust;
+                if (configurationMode != AdaptiveConfigurationMode.Baseline)
+                {
+                    frozenExperts = AdaptiveConfigurationEngine.Select(
+                        fullRobust, fullAdaptivePool, sessions, 0, sessions.Count,
+                        allowCandleFilter: configurationMode ==
+                            AdaptiveConfigurationMode.AdaptiveCandles);
+                    frozenChoices = AdaptiveConfigurationEngine.Apply(
+                        frozenExperts, fullRobust, sessions, originalOrb,
+                        0, sessions.Count);
+                }
                 var (policy, bestRegime) = SelectTrainingRouter(
-                    fullRobust, sessions, 0, sessions.Count);
+                    frozenChoices, sessions, 0, sessions.Count);
                 Console.WriteLine();
                 Console.WriteLine("=== FULL-HISTORICAL-TRAINING FINAL SELECTION (FROZEN) ===");
                 Console.WriteLine("Training: dbo." + sourceTable + ", " +
@@ -675,7 +757,7 @@ public static class MultiStrategyRunner
                     "from training only): " + bestRegime.Description);
                 foreach (var kind in kinds)
                 {
-                    var selected = fullRobust[kind];
+                    var selected = frozenChoices[kind];
                     Console.WriteLine("TRAIN_FROZEN," + kind + ",config=" +
                         selected.Variant.Id + ",train_net=" + F(selected.Score.Net) +
                         ",train_robustness=" + F(selected.Robustness) +
@@ -687,9 +769,20 @@ public static class MultiStrategyRunner
                         ",best_week_profit_share=" + F(selected.Consistency.BestWeekShare) +
                         ",settings=" + selected.Variant.Parameters);
                 }
+                if (frozenExperts is not null)
+                {
+                    Console.WriteLine("TRAIN_EXPERT_TOTAL," +
+                        frozenExperts.ExpertCount + ",mode=" + configurationMode);
+                    foreach (var (kind, routes) in frozenExperts.Rules.OrderBy(x => x.Key))
+                        foreach (var (state, rule) in routes.OrderBy(x => x.Key))
+                            Console.WriteLine("TRAIN_EXPERT," + kind + "," + state +
+                                ",config=" + rule.Variant.Id +
+                                ",side=" + rule.Variant.SignalMode +
+                                ",candle_filter=" + rule.CandleRule);
+                }
                 onSelected(HistoricalReplayRunner.FromSelection(
-                    sessions[0].Day, sessions[^1].Day, fullRobust,
-                    policy, bestRegime));
+                    sessions[0].Day, sessions[^1].Day, frozenChoices,
+                    policy, bestRegime, frozenExperts));
             }
             else
                 onSelected(lastFoldPlan ?? throw new InvalidOperationException(
@@ -1027,6 +1120,9 @@ public static class MultiStrategyRunner
             0.30m * Math.Max(0m, curve.BestWeekShare - 0.33m));
     }
 
+    internal static bool BetterAdaptiveCandidate(Choice a, Choice b) =>
+        BetterRobust(a, b);
+
     private static bool BetterRobust(Choice a, Choice b) =>
         a.Robustness > b.Robustness ||
         a.Robustness == b.Robustness &&
@@ -1083,24 +1179,28 @@ public static class MultiStrategyRunner
         // training cohort, using only features available at the routing time.
         // Regime-aware fallback options must stay IN that same cohort, rather
         // than silently crossing from trending into a reversal setup.
-        var rankedByRegime = winners.Values
-            .Where(c => c.Score.Net > 0m)
-            .GroupBy(c => (Slot: c.Variant.Slot,
-                           Trend: IsTrendStrategy(c.Variant.Kind, c.Variant.SignalMode)))
+        // Adaptive families may switch direction by market state. They
+        // compete in both cohorts; each frozen expert still gates its trades
+        // on the actual point-in-time state and signal candle.
+        var cohortCandidates = winners.Values.Where(c => c.Score.Net > 0m)
+            .SelectMany(c => c.IsAdaptive
+                ? new[] { (Choice: c, Trend: true), (Choice: c, Trend: false) }
+                : new[] { (Choice: c, Trend: IsTrendStrategy(
+                    c.Variant.Kind, c.Variant.SignalMode)) }).ToArray();
+        var rankedByRegime = cohortCandidates
+            .GroupBy(x => (Slot: x.Choice.Variant.Slot, x.Trend))
             .ToDictionary(g => g.Key, g => g
-                .OrderByDescending(c => c.Robustness)
-                .ThenByDescending(c => c.Score.Net)
-                .ThenBy(c => c.Variant.Id)
-                .Select(c => c.Variant.Kind).ToArray());
-        var bestByRegime = winners.Values
-            .Where(c => c.Score.Net > 0m)
-            .GroupBy(c => (Slot: c.Variant.Slot,
-                           Trend: IsTrendStrategy(c.Variant.Kind, c.Variant.SignalMode)))
+                .OrderByDescending(x => x.Choice.Robustness)
+                .ThenByDescending(x => x.Choice.Score.Net)
+                .ThenBy(x => x.Choice.Variant.Id)
+                .Select(x => x.Choice.Variant.Kind).ToArray());
+        var bestByRegime = cohortCandidates
+            .GroupBy(x => (Slot: x.Choice.Variant.Slot, x.Trend))
             .ToDictionary(g => g.Key, g => g
-                .OrderByDescending(c => c.Robustness)
-                .ThenByDescending(c => c.Score.Net)
-                .ThenBy(c => c.Variant.Id)
-                .First().Variant.Kind);
+                .OrderByDescending(x => x.Choice.Robustness)
+                .ThenByDescending(x => x.Choice.Score.Net)
+                .ThenBy(x => x.Choice.Variant.Id)
+                .First().Choice.Variant.Kind);
 
         for (var i = from; i < to; i++)
         {

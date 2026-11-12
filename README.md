@@ -1,7 +1,21 @@
 # ES Multi-Strategy Backtester + Original ORB Optimizer
 
-Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The current default runs a **focused five-family** chronological research experiment: it selects from **235,008 base configurations (470,016 original/reversed directional evaluations)** on `dbo.MES_DATA_2020_2025`, freezes the five training-selected configurations and portfolio router, and evaluates them **unchanged** on `dbo.MES_DATA` (2025–2026). Set `Backtest:StrategyScope=Full` to restore the complete **19-family, 587,520-base-configuration (1,175,040-directional-evaluation)** search. Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
+Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The current default runs a **focused five-family** chronological research experiment: it selects from **235,008 base configurations (470,016 original/reversed directional evaluations)** on `dbo.MES_DATA_2020_2025`, freezes the training-selected regime-specific configurations and portfolio router, and evaluates them **unchanged** on `dbo.MES_DATA` (2025–2026). Set `Backtest:StrategyScope=Full` to restore the complete **19-family, 587,520-base-configuration (1,175,040-directional-evaluation)** search. Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
 
+
+### Adaptive configurations and candle features (November 2026)
+
+`Backtest:ConfigurationMode` (independent of `StrategyScope`) controls configuration selection:
+
+- `Baseline`: original one training-selected configuration per strategy; no adaptive specialists.
+- `Adaptive`: retain two diverse high-scoring TRAINING configurations per strategy/direction/exit class; select **at most one per strategy** in each predeclared `Trend`, `Range`, or `Transition` market state. Missing references, volatility shocks and thin liquidity are **no trade**.
+- `AdaptiveCandles` (**default**): same as Adaptive, additionally compares an optional pre-entry **rejection-wick / engulfing candle confirmation** against unfiltered candidates on training only. Some selected experts may require a candle pattern; others may not.
+
+The state is computed exclusively from completed, same-contract ES candles **at 09:45 morning / 13:00 afternoon / 19:00 overnight** using fixed, disclosed market-regime thresholds. The candle confirmation uses only the completed one-minute bar **immediately before next-bar-open entry**. An expert is eligible only after the observation cutoff, and only if its historical training sample satisfies minimum trade/half-sample counts, a profitable **$20/ES cost sensitivity**, a positive drawdown/consistency-adjusted score, and minimum profitable calendar months. Empty states explicitly **do not trade**. One frozen rule per family/state is selected from training; evaluation data never update that rule. `FOLD_EXPERT_COMPARE` prints baseline/adaptive/candle OOS research comparisons; `TRAIN_EXPERT` and `REPLAY_EXPERT` disclose frozen routes and filters. The existing portfolio router continues to rank families using their **training-only** adaptive P&L.
+
+**Limitations:** This is a transparent coarse regime-conditioned configuration selector, not an AI model or real-time retrainer. It selects from a deliberately small top-candidate shortlist per strategy rather than claiming to find the absolute best setting for every regime across the entire million-candidate search. Historical selection still carries multiple-testing bias; the earlier data and 2025–2026 have already been examined. New untouched dates or paper trading are necessary for independent validation. Candle patterns are hypotheses, not assumed predictive edges.
+
+Set `"ConfigurationMode": "Baseline"` to compare against the prior single-configuration implementation without changing the five-family shortlist.
 
 ### Five-family focused research (default)
 
@@ -22,6 +36,7 @@ To change the default, edit `appsettings.json` under `Backtest`:
     "Mode": "HistoricalThenRecent",
     "SearchProfile": "Deep",
     "StrategyScope": "Focused",
+    "ConfigurationMode": "AdaptiveCandles",
     "ParallelWorkers": 0
   }
 }

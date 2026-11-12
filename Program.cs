@@ -34,6 +34,12 @@ try
         !Enum.IsDefined(strategyScope))
         throw new ArgumentException(
             "Backtest:StrategyScope must be Focused (five families) or Full (all 19).");
+    var configModeText = configuration["Backtest:ConfigurationMode"] ?? "AdaptiveCandles";
+    if (!Enum.TryParse<AdaptiveConfigurationMode>(
+            configModeText, true, out var configurationMode) ||
+        !Enum.IsDefined(configurationMode))
+        throw new ArgumentException(
+            "Backtest:ConfigurationMode must be Baseline, Adaptive or AdaptiveCandles.");
     var workersText = configuration["Backtest:ParallelWorkers"] ?? "0";
     if (!int.TryParse(workersText, out var parallelWorkers) ||
         parallelWorkers < 0 || parallelWorkers > 32)
@@ -43,11 +49,11 @@ try
     if (mode is "historicalthenrecent" or "reverse" or "historicaltrainthenrecent")
         return await HistoricalReplayRunner.RunHistoricalThenRecentAsync(
             configuration.GetConnectionString("MarketData"), symbol, timeZone,
-            searchProfile, root, parallelWorkers, strategyScope);
+            searchProfile, root, parallelWorkers, strategyScope, configurationMode);
     if (mode is "researchthenhistorical" or "combined" or "pipeline")
         return await HistoricalReplayRunner.RunSequentialAsync(
             configuration.GetConnectionString("MarketData"), symbol, timeZone,
-            searchProfile, root, parallelWorkers, strategyScope);
+            searchProfile, root, parallelWorkers, strategyScope, configurationMode);
     if (mode is "historicalreplay" or "historical")
         return await HistoricalReplayRunner.RunAsync(
             configuration.GetConnectionString("MarketData"), symbol, timeZone, searchProfile);
@@ -67,7 +73,7 @@ try
     {
         case "multi":
             return MultiStrategyRunner.Run(bars, marketData.AllContractBars, root, searchProfile,
-                parallelWorkers, strategyScope);
+                parallelWorkers, strategyScope, configurationMode);
         case "orb":
             return WalkForwardRunner.Run(bars, marketData.AllContractBars);
         case "both":
@@ -75,7 +81,7 @@ try
             // Console-only multi-strategy results precede the original ORB optimizer.
             var multiExit = MultiStrategyRunner.Run(
                 bars, marketData.AllContractBars, root, searchProfile,
-                parallelWorkers, strategyScope);
+                parallelWorkers, strategyScope, configurationMode);
             if (multiExit != 0) return multiExit;
             return WalkForwardRunner.Run(bars, marketData.AllContractBars);
         }

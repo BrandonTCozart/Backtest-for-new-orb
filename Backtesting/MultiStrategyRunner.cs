@@ -92,9 +92,10 @@ public static class MultiStrategyRunner
     public static int Run(
         List<PriceBar> active, List<PriceBar> all, string root,
         MultiSearchProfile profile = MultiSearchProfile.Deep,
-        int parallelWorkers = 0) =>
+        int parallelWorkers = 0,
+        MultiStrategyScope strategyScope = MultiStrategyScope.Focused) =>
         RunCore(active, all, root, profile, null,
-            parallelWorkers: parallelWorkers);
+            parallelWorkers: parallelWorkers, strategyScope: strategyScope);
 
     // The combined pipeline captures the ACTUAL last-fold training winners
     // and routing policy. This avoids re-fitting or stale pinned variant IDs.
@@ -104,9 +105,10 @@ public static class MultiStrategyRunner
         Action<HistoricalReplayRunner.FrozenPlan> onSelected,
         bool fitEntireTrainingSample = false,
         string sourceTable = "MES_DATA",
-        int parallelWorkers = 0) =>
+        int parallelWorkers = 0,
+        MultiStrategyScope strategyScope = MultiStrategyScope.Focused) =>
         RunCore(active, all, root, profile, onSelected,
-            fitEntireTrainingSample, sourceTable, parallelWorkers);
+            fitEntireTrainingSample, sourceTable, parallelWorkers, strategyScope);
 
     private static int RunCore(
         List<PriceBar> active, List<PriceBar> all, string root,
@@ -114,7 +116,8 @@ public static class MultiStrategyRunner
         Action<HistoricalReplayRunner.FrozenPlan>? onSelected,
         bool fitEntireTrainingSample = false,
         string sourceTable = "MES_DATA",
-        int parallelWorkers = 0)
+        int parallelWorkers = 0,
+        MultiStrategyScope strategyScope = MultiStrategyScope.Focused)
     {
         // No report artifacts are written. The SQL run reports results in the terminal.
         Console.WriteLine();
@@ -145,8 +148,15 @@ public static class MultiStrategyRunner
                 sessions.Count, sessions.Count)).ToArray()
             : folds;
         var sessionDays = sessions.Select(s => s.Day).ToArray();
-        var variants = MultiStrategyEngine.EnumerateVariants(profile);
-        var kinds = Enum.GetValues<MultiStrategyKind>();
+        var variants = MultiStrategyScopeSelection.Filter(
+            MultiStrategyEngine.EnumerateVariants(profile), strategyScope);
+        var kinds = MultiStrategyScopeSelection.Kinds(variants);
+        Console.WriteLine("Strategy scope: " + strategyScope + " (" +
+            string.Join(", ", kinds) + ")");
+        if (strategyScope == MultiStrategyScope.Focused)
+            Console.WriteLine("CAUTION: the five-family shortlist was chosen after " +
+                "prior OOS results were examined; this run is research, " +
+                "not an untouched selection validation.");
         var countByKind = variants.GroupBy(v => v.Kind)
             .ToDictionary(g => g.Key, g => g.Count());
         Console.WriteLine("Search profile " + profile + ": " +
@@ -319,7 +329,9 @@ public static class MultiStrategyRunner
             "Source: dbo." + sourceTable + "; complete RTH trading dates: " + sessions.Count,
             "Date range: " + Day(sessions[0].Day) + " through " + Day(sessions[^1].Day),
             "Complete overnight windows: " + sessions.Count(x => x.Overnight is not null),
-            "Profile: " + profile + "; candidate configurations: " + variants.Count,
+            "Profile: " + profile + "; scope: " + strategyScope +
+            "; strategy families: " + kinds.Length +
+            "; candidate configurations: " + variants.Count,
             "Training ranks candidates by net P&L adjusted for drawdown and unstable halves.",
             "Each chronological fold ranks ONLY earlier training dates; its later test is OOS for that fold.",
             "Full-sample profit and highest-win-rate winners are IN-SAMPLE diagnostics.",
@@ -841,8 +853,8 @@ public static class MultiStrategyRunner
             }
         }
 
-        foreach (var kind in Enum.GetValues<MultiStrategyKind>())
-            Append(kind.ToString(), individualOos[kind]);
+        foreach (var (kind, trades) in individualOos.OrderBy(x => x.Key))
+            Append(kind.ToString(), trades);
         Append("SelectedPortfolio", selectedPortfolioOos);
         return rows;
     }

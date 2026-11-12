@@ -91,6 +91,34 @@ public static class MultiStrategySelfTests
                        k => variants.Any(v => v.Kind == k)),
                 "All 19 price-action and legacy strategy families need smoke candidates.");
 
+            var focusedKinds = MultiStrategyScopeSelection.FocusedKinds.ToHashSet();
+            Ensure(focusedKinds.Count == 5 &&
+                   focusedKinds.SetEquals(new[] {
+                       MultiStrategyKind.Orb,
+                       MultiStrategyKind.MorningVwapReversion,
+                       MultiStrategyKind.AfternoonVwapReversion,
+                       MultiStrategyKind.AfternoonMomentum,
+                       MultiStrategyKind.MorningLiquiditySweep
+                   }),
+                "Focused selection must keep exactly the agreed five strategy families.");
+            var focusedDeep = MultiStrategyScopeSelection.Filter(
+                deepVariants, MultiStrategyScope.Focused);
+            var fullDeep = MultiStrategyScopeSelection.Filter(
+                deepVariants, MultiStrategyScope.Full);
+            var focusedSmoke = MultiStrategyScopeSelection.Filter(
+                variants, MultiStrategyScope.Focused);
+            Ensure(ReferenceEquals(fullDeep, deepVariants) &&
+                   focusedDeep.Count == 235008 &&
+                   focusedDeep.All(v => focusedKinds.Contains(v.Kind)) &&
+                   focusedSmoke.All(v => focusedKinds.Contains(v.Kind)) &&
+                   focusedDeep.Select(v => v.Id).SequenceEqual(
+                       deepVariants.Where(v => focusedKinds.Contains(v.Kind))
+                           .Select(v => v.Id)) &&
+                   focusedDeep.Select(v => v.Id).Distinct().Count() == focusedDeep.Count,
+                "The 5-family Deep scope must preserve original variant IDs " +
+                "and reduce directional evaluations from 1,175,040 to 470,016.");
+            Console.WriteLine("PASS: focused five-family scope, original IDs and full-grid fallback.");
+
             foreach (var variant in variants.Where(v => v.Kind != MultiStrategyKind.Orb))
             {
                 var result = MultiStrategyEngine.GenerateDay(variant, session);
@@ -213,7 +241,8 @@ public static class MultiStrategySelfTests
             {
                 Console.SetOut(captured);
                 status = MultiStrategyRunner.Run(syntheticYear, syntheticYear,
-                    folder, MultiSearchProfile.Smoke, parallelWorkers: 1);
+                    folder, MultiSearchProfile.Smoke, parallelWorkers: 1,
+                    strategyScope: MultiStrategyScope.Full);
             }
             finally
             {
@@ -234,7 +263,8 @@ public static class MultiStrategySelfTests
                 Console.SetOut(parallelCaptured);
                 parallelStatus = MultiStrategyRunner.Run(syntheticYear,
                     syntheticYear, folder, MultiSearchProfile.Smoke,
-                    parallelWorkers: 4);
+                    parallelWorkers: 4,
+                    strategyScope: MultiStrategyScope.Full);
             }
             finally
             {
@@ -250,6 +280,41 @@ public static class MultiStrategySelfTests
                 "Parallel versus serial candidates must select identical " +
                 "variants, router, fold scores and OOS trade results.");
             Console.WriteLine("PASS: serial and 4-worker full smoke-grid backtests match.");
+
+            // A genuine focused end-to-end optimizer run, including regime
+            // router selection and reporting, must never re-introduce 14
+            // omitted strategy families.
+            using var focusedCaptured = new StringWriter();
+            int focusedStatus;
+            try
+            {
+                Console.SetOut(focusedCaptured);
+                focusedStatus = MultiStrategyRunner.Run(
+                    syntheticYear, syntheticYear, folder,
+                    MultiSearchProfile.Smoke, parallelWorkers: 1,
+                    strategyScope: MultiStrategyScope.Focused);
+            }
+            finally
+            {
+                Console.SetOut(regularOut);
+            }
+            var focusedReport = focusedCaptured.ToString();
+            var focusedTotals = focusedReport.Split('\n')
+                .Where(x => x.StartsWith("TOTAL_PNL,", StringComparison.Ordinal))
+                .ToArray();
+            Ensure(focusedStatus == 0 &&
+                   focusedReport.Contains("Strategy scope: Focused (") &&
+                   focusedReport.Contains("5 strategy types") &&
+                   focusedTotals.Length == 8 && // header + 5 families + 2 portfolios
+                   focusedTotals.Any(x =>
+                       x.StartsWith("TOTAL_PNL,SelectedPortfolio,")) &&
+                   !focusedReport.Contains("TOTAL_PNL,MorningMomentum,") &&
+                   focusedKinds.All(k =>
+                       focusedTotals.Any(x => x.StartsWith(
+                           "TOTAL_PNL," + k + ",", StringComparison.Ordinal))),
+                "Focused smoke backtest must report only five families and " +
+                "must complete router/walk-forward training.");
+            Console.WriteLine("PASS: end-to-end focused five-family research and reporting.");
             Ensure(terminal.Contains("WEEKLY_OOS,week_start_et,week_end_et,strategy,net_usd,cumulative_net_usd,trades"),
                 "Weekly terminal output must have the expected graph-ready columns.");
             var weeklyLines = terminal.Split('\n')
@@ -321,6 +386,40 @@ public static class MultiStrategySelfTests
                    fresh.Choices[MultiStrategyKind.MorningVwapReversion]
                        .Variant.ExitMode == MultiExitMode.TargetThenTrail,
                 "Combined replay must capture freshly optimized exit settings and router.");
+
+            // The focused frozen plan must replay only the selected five
+            // variants, with exactly the same original ID and no auto-promotion.
+            var focusedChoices = selectedKinds
+                .Where(x => focusedKinds.Contains(x.Key))
+                .ToDictionary(x => x.Key, x => x.Value);
+            var focusedPolicy = new MultiPortfolioPolicy(
+                MultiPortfolioMode.Single, MultiStrategyKind.MorningVwapReversion);
+            var focusedPlan = HistoricalReplayRunner.FromSelection(
+                date, date, focusedChoices, focusedPolicy);
+            Ensure(focusedPlan.Choices.Count == 5 &&
+                   focusedPlan.Choices.Keys.ToHashSet().SetEquals(focusedKinds),
+                "Frozen plan must support exactly five selected families.");
+            using var focusedReplay = new StringWriter();
+            try
+            {
+                Console.SetOut(focusedReplay);
+                Ensure(HistoricalReplayRunner.Replay(
+                    focusedPlan, syntheticYear, syntheticYear) == 0,
+                    "Focused five-family frozen replay must succeed.");
+            }
+            finally
+            {
+                Console.SetOut(regularOut);
+            }
+            var focusReplayRows = focusedReplay.ToString().Split('\n')
+                .Where(x => x.StartsWith("REPLAY_TOTAL,", StringComparison.Ordinal))
+                .ToArray();
+            Ensure(focusReplayRows.Length == 8 && // header + 5 families + 2 portfolios
+                   focusReplayRows.Any(x =>
+                       x.StartsWith("REPLAY_TOTAL,MorningLiquiditySweep,")) &&
+                   !focusedReplay.ToString().Contains("REPLAY_TOTAL,MorningMomentum,"),
+                "Frozen five-family replay must never add excluded strategies.");
+            Console.WriteLine("PASS: frozen five-family replay stays focused.");
 
             // Regression of frozen historical replay: no SQL, no new fit on
             // historical candles, no file outputs, full weekly reconciliation.

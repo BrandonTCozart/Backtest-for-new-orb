@@ -1,11 +1,37 @@
 # ES Multi-Strategy Backtester + Original ORB Optimizer
 
-Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The current default runs the **reverse, chronological experiment** requested on November 11, 2026: **optimize all 587,520 ES configurations on `dbo.MES_DATA_2020_2025`**, then **freeze the full-historical-training-selected 19 strategy variants and portfolio router** and evaluate them **unchanged** on `dbo.MES_DATA` (2025–2026). Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
+Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The current default runs a **focused five-family** chronological research experiment: it selects from **235,008 base configurations (470,016 original/reversed directional evaluations)** on `dbo.MES_DATA_2020_2025`, freezes the five training-selected configurations and portfolio router, and evaluates them **unchanged** on `dbo.MES_DATA` (2025–2026). Set `Backtest:StrategyScope=Full` to restore the complete **19-family, 587,520-base-configuration (1,175,040-directional-evaluation)** search. Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
 
+
+### Five-family focused research (default)
+
+`Backtest:StrategyScope` is independent of `Backtest:SearchProfile`:
+
+- `Focused` (**default**): Opening Range Breakout (ORB), Morning VWAP Reversion, Afternoon VWAP Reversion, Afternoon Momentum, Morning Liquidity Sweep. Deep tests **235,008 base settings × two actual trade directions = 470,016 evaluations**.
+- `Full`: all original **19 strategy families**, **587,520 Deep settings × two directions = 1,175,040 evaluations**.
+
+Both modes retain the **exact original Deep-grid candidate IDs**; focused filtering happens *after* ID assignment. Only the selected five families enter ranking, fold comparisons, router optimization, final training selection, and frozen forward replay; the 14 other families are **not deleted**, and `Full` restores them. Frozen legacy `HistoricalReplay` remains an explicit, 19-family pinned comparison mode and is unaffected by `StrategyScope`. `Smoke` can be combined with either scope for development tests.
+
+**Research caveat:** This shortlist was chosen after inspecting previous walk-forward and 2025–2026 results. Thus rerunning 2025–2026 with the focused list is **not** independent validation of the five-family selection. Use a later untouched period or live paper-trading observations to validate whether it generalizes. Smaller scope reduces simulations and multiple-testing burden but does not prove improved edge.
+
+To change the default, edit `appsettings.json` under `Backtest`:
+
+```json
+{
+  "Backtest": {
+    "Mode": "HistoricalThenRecent",
+    "SearchProfile": "Deep",
+    "StrategyScope": "Focused",
+    "ParallelWorkers": 0
+  }
+}
+```
+
+Change only `StrategyScope` to `"Full"` for the original 19-strategy experiment.
 
 ### Consistency scoring and true reverse-direction research
 
-The optimizer now evaluates **original AND inverted signal directions for every base grid configuration**, preserving all original config IDs (587,520 in Deep, now **1,175,040 direction-specific evaluations**). A reversed candidate retains the ORIGINAL signal's observation timestamp and next-open entry, but simulates its own side-specific initial stop, risk cap, target, trailing stop and time exit with the same estimated costs. ORB uses the actual staged ORB stop engine for both directions. For precomputed Fibonacci fixed targets, the reverse simulation reflects the **known pre-entry distance** across the next-open price; for structure-target exits, only actual opposite-side historic levels qualify. No backtest return is negated, and an overnight or same-day OOS result is never used to pick a direction. A selected strategy records `signal_mode=Original`, `Reversed`, or `Disabled` in its frozen parameters.
+The optimizer evaluates **original AND inverted signal directions for each enabled base grid configuration**, preserving all original config IDs (235,008 in the default Focused Deep scope; 587,520 in optional Full Deep). A reversed candidate retains the ORIGINAL signal's observation timestamp and next-open entry, but simulates its own side-specific initial stop, risk cap, target, trailing stop and time exit with the same estimated costs. ORB uses the actual staged ORB stop engine for both directions. For precomputed Fibonacci fixed targets, the reverse simulation reflects the **known pre-entry distance** across the next-open price; for structure-target exits, only actual opposite-side historic levels qualify. No backtest return is negated, and an overnight or same-day OOS result is never used to pick a direction. A selected strategy records `signal_mode=Original`, `Reversed`, or `Disabled` in its frozen parameters.
 
 The existing training robustness formula (net P&L minus 0.5×drawdown minus 0.5×loss in either training half) now additionally penalizes (a) a low share of **profitable calendar months**, (b) a low share of **profitable calendar weeks**, and (c) domination by one profitable week. Inactive calendar periods are included in denominators; the trade-count floor and both-half coverage requirements remain unchanged. A family is **Disabled** if even its highest-scoring TRAINING original/reverse choice fails to produce both positive net and positive consistency-adjusted robustness. This creates an explicit no-trade alternative; disabled families cannot produce forward trades. A report row prints each chosen direction, its positive week/month counts, and the largest positive week's share of gross profitable weeks. The selection rule is deliberately simple, fixed in advance, and NOT fitted on 2025–2026 forward results.
 
@@ -32,7 +58,7 @@ Set `Backtest:Mode` in `appsettings.json` or a local override:
 | `Orb` | Original separate exhaustive ORB-only optimizer |
 | `Both` | Recent-data multi-strategy optimizer followed by independent ORB optimizer |
 
-The **Deep** multi-strategy grid evaluates **587,520 configurations across 19 strategy families**, retaining all original IDs and comparing fixed reward/risk targets, historical support/resistance targets, 25 ATR trailing activation/distance pairs with selected break-even choices, ORB-inspired staged profit locks, and target-activated trails. ORB itself retains its native staged exits. The `Smoke` profile (2,040 candidates) is a quick development/regression subset; default `Deep` tests everything. Running Deep on ~1,246 older validated sessions is substantially more computationally expensive than the previous ~250-session recent optimization.
+The full **Deep** multi-strategy grid contains **587,520 configurations across 19 strategy families** (default Focused runs five), retaining all original IDs and comparing fixed reward/risk targets, historical support/resistance targets, 25 ATR trailing activation/distance pairs with selected break-even choices, ORB-inspired staged profit locks, and target-activated trails. ORB itself retains its native staged exits. The `Smoke` profile (2,040 candidates) is a quick development/regression subset; default `Deep` tests everything. Running Deep on ~1,246 older validated sessions is substantially more computationally expensive than the previous ~250-session recent optimization.
 
 ### CPU parallel processing
 
@@ -105,14 +131,14 @@ The portfolio selects **at most one strategy per time slot**, never overlaps act
 
 With `Backtest:Mode=HistoricalThenRecent` and `Backtest:SearchProfile=Deep`, pressing **Play** automatically:
 
-1. Loads `dbo.MES_DATA_2020_2025`, validates the historical 2020–2025 release calendar and full ES sessions, and evaluates **all 587,520 configurations** on older history. It also prints five expanding walk-forward folds **within** the older period to diagnose training instability.
+1. Loads `dbo.MES_DATA_2020_2025`, validates the historical 2020–2025 release calendar and full ES sessions, and evaluates **235,008 focused Deep configurations in both directions** (or all 587,520 in Full scope) on older history. It also prints five expanding walk-forward folds **within** the older period to diagnose training instability.
 2. **Refits on the entire validated older period** (approximately **2020-09-08 through 2025-09-08**), choosing the highest **risk/drawdown-adjusted training score** per strategy, subject to minimum trades in each half, and chooses the router using the same robust scoring and older data. Reports each final candidate in `TRAIN_FROZEN` lines with exact parameters. These are **full-sample in-sample training choices**, not older-fold OOS winners.
-3. Freezes all **19 strategy configurations and the router**, clears caches, then loads **`dbo.MES_DATA`** and evaluates those choices unchanged on the later period (roughly **2025-10-06 through 2026-10-05**). **No future-period profit, loss, exit, or other outcome is used to refit anything.**
+3. Freezes the **five selected strategy configurations and the router** (or all 19 in Full scope), clears caches, then loads **`dbo.MES_DATA`** and evaluates those choices unchanged on the later period (roughly **2025-10-06 through 2026-10-05**). **No future-period profit, loss, exit, or other outcome is used to refit anything.**
 4. Prints `REPLAY_ROUTER`, `REPLAY_TOTAL`, `YEARLY_REPLAY`, and `WEEKLY_REPLAY` for **forward** performance, with an additional non-selected fallback-router diagnostic. The forward `REPLAY_TOTAL` column `nonoverlap_forward_net_usd` equals total net and overlap is zero by construction. No research CSV or text files are created.
 
 **Historical release coverage:** `Backtesting/HistoricalEconomicCalendar.g.cs` includes archived 2020–2025 scheduled releases (BLS, Federal Reserve, BEA, Census, plus some rule-derived ISM dates). The optimizer validates its historical calendar coverage **before** fitting. The newer period uses the checked-in 2025–2026 release schedule. Any overlapping training/test dates cause a hard failure. The rules use calendar timing, not future economic outcomes.
 
-**Previous modes remain intact:**
+**Previous modes remain available:**
 - `ResearchThenHistorical` still optimizes on the recent table and replays its **fifth-fold training** choices on the earlier table, unchanged from the preceding experiment.
 - `HistoricalReplay` still reproduces the older **hard-coded** fold IDs rather than the current optimizer's winners.
 - `Multi`, `Orb`, and `Both` retain their prior behavior.

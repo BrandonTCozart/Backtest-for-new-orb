@@ -58,11 +58,14 @@ public static class HistoricalReplayRunner
         MultiPortfolioPolicy selectedPolicy,
         MultiPortfolioPolicy? regimeComparison = null)
     {
-        var kinds = Enum.GetValues<MultiStrategyKind>();
-        if (kinds.Any(kind => !chosen.ContainsKey(kind)))
+        var selected = chosen.Keys.OrderBy(k => k).ToArray();
+        var all = Enum.GetValues<MultiStrategyKind>();
+        var focused = MultiStrategyScopeSelection.FocusedKinds.OrderBy(k => k).ToArray();
+        if (!selected.SequenceEqual(all) && !selected.SequenceEqual(focused))
             throw new InvalidOperationException(
-                "Last walk-forward fold did not produce a qualified configuration " +
-                "for every strategy. Historical comparison cannot silently use stale IDs.");
+                "Frozen replay requires an exact full (19) or focused (5) " +
+                "training-selected strategy set. Missing winners may not be " +
+                "silently replaced with stale configuration IDs.");
         return new FrozenPlan(trainingFrom, trainingThrough,
             chosen.ToDictionary(x => x.Key, x => new FrozenChoice(
                 x.Value.Variant, x.Value.Score, x.Value.Early,
@@ -75,16 +78,19 @@ public static class HistoricalReplayRunner
     // frozen historical evaluation on MES_DATA_2020_2025.
     public static async Task<int> RunSequentialAsync(
         string? connectionString, string symbol, string timeZone,
-        MultiSearchProfile profile, string root, int parallelWorkers = 0)
+        MultiSearchProfile profile, string root, int parallelWorkers = 0,
+        MultiStrategyScope strategyScope = MultiStrategyScope.Focused)
     {
         Console.WriteLine("=== COMBINED RESEARCH + HISTORICAL VALIDATION ===");
-        Console.WriteLine("Step 1/2: walk-forward optimize dbo.MES_DATA using " + profile + ".");
+        Console.WriteLine("Step 1/2: walk-forward optimize dbo.MES_DATA using " +
+            profile + " with " + strategyScope + " strategy scope.");
         var recent = await SqlMarketDataLoader.LoadAsync(
             connectionString, symbol, timeZone, tableName: "MES_DATA");
         FrozenPlan? selected = null;
         var status = MultiStrategyRunner.RunAndCapture(
             recent.ActiveBars, recent.AllContractBars, root, profile,
-            plan => selected = plan, parallelWorkers: parallelWorkers);
+            plan => selected = plan, parallelWorkers: parallelWorkers,
+            strategyScope: strategyScope);
         if (status != 0) return status;
         if (selected is null)
             throw new InvalidOperationException("No training-selected historical plan.");
@@ -108,10 +114,12 @@ public static class HistoricalReplayRunner
     // before loading any of the later, strictly forward test data.
     public static async Task<int> RunHistoricalThenRecentAsync(
         string? connectionString, string symbol, string timeZone,
-        MultiSearchProfile profile, string root, int parallelWorkers = 0)
+        MultiSearchProfile profile, string root, int parallelWorkers = 0,
+        MultiStrategyScope strategyScope = MultiStrategyScope.Focused)
     {
         Console.WriteLine("=== HISTORICAL TRAINING -> RECENT FORWARD TEST (NO LIVE ORDERS) ===");
-        Console.WriteLine("Step 1/2: full Deep-grid training on dbo.MES_DATA_2020_2025.");
+        Console.WriteLine("Step 1/2: " + profile + "-grid " + strategyScope +
+            " training on dbo.MES_DATA_2020_2025.");
         var historical = await SqlMarketDataLoader.LoadAsync(
             connectionString, symbol, timeZone, tableName: "MES_DATA_2020_2025");
         if (historical.ActiveBars.Count == 0)
@@ -127,7 +135,8 @@ public static class HistoricalReplayRunner
             historical.ActiveBars, historical.AllContractBars, root, profile,
             plan => selected = plan, fitEntireTrainingSample: true,
             sourceTable: "MES_DATA_2020_2025",
-            parallelWorkers: parallelWorkers);
+            parallelWorkers: parallelWorkers,
+            strategyScope: strategyScope);
         if (status != 0) return status;
         if (selected is null)
             throw new InvalidOperationException(
@@ -312,7 +321,10 @@ public static class HistoricalReplayRunner
 
         var choices = new Dictionary<MultiStrategyKind, MultiStrategyRunner.Choice>();
         var individual = new Dictionary<MultiStrategyKind, List<MultiStrategyTrade>>();
-        foreach (var kind in Enum.GetValues<MultiStrategyKind>())
+        var selectedKinds = plan.Choices.Keys.OrderBy(k => k).ToArray();
+        Console.WriteLine("Replaying " + selectedKinds.Length +
+            " frozen strategy families (no omitted family re-optimized).");
+        foreach (var kind in selectedKinds)
         {
             var frozen = plan.Choices[kind];
             var generated = MultiStrategyEngine.Generate(frozen.Variant, sessions, orb);
@@ -378,8 +390,10 @@ public static class HistoricalReplayRunner
         // In forward mode all evaluation trades are strictly later than training.
         Console.WriteLine();
         Console.WriteLine(forwardHoldout
-            ? "=== FROZEN FORWARD RESULTS: 19 STRATEGIES + SELECTED PORTFOLIO ==="
-            : "=== FROZEN REPLAY RESULTS: 19 STRATEGIES + SELECTED PORTFOLIO ===");
+            ? "=== FROZEN FORWARD RESULTS: " + selectedKinds.Length +
+                " STRATEGIES + SELECTED PORTFOLIO ==="
+            : "=== FROZEN REPLAY RESULTS: " + selectedKinds.Length +
+                " STRATEGIES + SELECTED PORTFOLIO ===");
         Console.WriteLine("REPLAY_TOTAL,strategy,total_net_usd," +
             (forwardHoldout ? "nonoverlap_forward_net_usd" : "clean_pretraining_net_usd") +
             ",overlap_net_usd,trades,win_rate_pct,max_closed_trade_drawdown_usd");
@@ -394,7 +408,7 @@ public static class HistoricalReplayRunner
                 F(clean.Net) + "," + F(overlap) + "," + total.Trades + "," +
                 F(total.WinRate) + "," + F(total.Drawdown));
         }
-        foreach (var kind in Enum.GetValues<MultiStrategyKind>())
+        foreach (var kind in selectedKinds)
             Report(kind.ToString(), individual[kind]);
         Report("SelectedPortfolio", allOos);
         Report("FallbackPortfolio", fallback.Trades);

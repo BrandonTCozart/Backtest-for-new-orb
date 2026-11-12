@@ -68,7 +68,23 @@ public static class MultiStrategyRunner
     internal sealed record Choice(
         MultiStrategyVariant Variant, MultiScore Score,
         IReadOnlyDictionary<DateOnly, MultiStrategyTrade> Trades,
-        decimal Robustness, MultiScore Early, MultiScore Late);
+        decimal Robustness, MultiScore Early, MultiScore Late,
+        CurveMetrics Consistency = default);
+    // Calendar-period consistency is always computed on TRAINING ONLY.
+    // Denominators include inactive weeks/months, preventing a one-trade
+    // equity curve from looking perfectly consistent.
+    internal readonly record struct CurveMetrics(
+        int ProfitableWeeks, int TotalWeeks,
+        int ProfitableMonths, int TotalMonths,
+        decimal BestPositiveWeek, decimal SumPositiveWeeks)
+    {
+        public decimal WeekRate => TotalWeeks == 0 ? 0m :
+            (decimal)ProfitableWeeks / TotalWeeks;
+        public decimal MonthRate => TotalMonths == 0 ? 0m :
+            (decimal)ProfitableMonths / TotalMonths;
+        public decimal BestWeekShare => SumPositiveWeeks <= 0m ? 0m :
+            BestPositiveWeek / SumPositiveWeeks;
+    }
     internal sealed record PortfolioOutcome(
         MultiPortfolioPolicy Policy, MultiScore Score,
         List<MultiStrategyTrade> Trades, int FallbackTrades);
@@ -134,12 +150,15 @@ public static class MultiStrategyRunner
         var countByKind = variants.GroupBy(v => v.Kind)
             .ToDictionary(g => g.Key, g => g.Count());
         Console.WriteLine("Search profile " + profile + ": " +
-                          variants.Count.ToString("N0", Ci) +
-                          " configurations across " + kinds.Length + " strategy types.");
+            variants.Count.ToString("N0", Ci) + " base configurations across " +
+            kinds.Length + " strategy types; " +
+            (2 * variants.Count).ToString("N0", Ci) +
+            " independently simulated original/reversed candidates.");
         foreach (var kind in kinds)
             Console.WriteLine("  " + kind + ": " + countByKind[kind].ToString("N0", Ci) +
                               " configurations");
-        Console.WriteLine(folds.Length + " chronological walk-forward folds; robustness-scored training split.");
+        Console.WriteLine(folds.Length + " chronological walk-forward folds; " +
+            "equity-consistency / drawdown-scored training and disabled alternative.");
         Console.WriteLine("Session positions do not overlap; 1 ES on new strategies; " +
                           "stops capped at $600 including estimated $10/contract costs.");
         Console.WriteLine("Console-only reporting; only current candidate and selected winners are retained in memory.");
@@ -169,69 +188,85 @@ public static class MultiStrategyRunner
         var selectionLock = new object();
         var progressLock = new object();
         var tested = 0;
-        void EvaluateCandidate(MultiStrategyVariant variant)
+        void EvaluateCandidate(MultiStrategyVariant recipe)
         {
-            var trades = MultiStrategyEngine.Generate(variant, sessions, originalOrb);
-            var (full, foldScores) = ScoreCandidateRanges(
-                trades, sessionDays, scoringFolds);
-            lock (selectionLock)
+            // Invert the PRE-ENTRY signal, then independently simulate both
+            // stops and exits. Reverse P&L is never derived by negating trades.
+            foreach (var mode in new[] { SignalMode.Original, SignalMode.Reversed })
             {
-                if (fitEntireTrainingSample)
+                var variant = recipe with { SignalMode = mode };
+                var trades = MultiStrategyEngine.Generate(variant, sessions, originalOrb);
+                var (full, foldScores, fullCurve) =
+                    ScoreCandidateRangesDetailed(trades, sessionDays, scoringFolds);
+                lock (selectionLock)
                 {
-                    var whole = foldScores[^1];
-                    var minimum = Math.Max(10, (sessions.Count + 11) / 12);
-                    if (full.Trades >= minimum &&
-                        whole.Early.Trades >= Math.Max(3, minimum / 4) &&
-                        whole.Late.Trades >= Math.Max(3, minimum / 4))
+                    if (fitEntireTrainingSample)
+                    {
+                        var whole = foldScores[^1];
+                        var minimum = Math.Max(10, (sessions.Count + 11) / 12);
+                        if (full.Trades >= minimum &&
+                            whole.Early.Trades >= Math.Max(3, minimum / 4) &&
+                            whole.Late.Trades >= Math.Max(3, minimum / 4))
+                        {
+                            var candidate = new Choice(variant, full, trades,
+                                ConsistencyRobustness(full, whole.Early,
+                                    whole.Late, fullCurve),
+                                whole.Early, whole.Late, fullCurve);
+                            if (!fullRobust.TryGetValue(variant.Kind, out var current) ||
+                                BetterRobust(candidate, current))
+                                fullRobust[variant.Kind] = candidate;
+                        }
+                    }
+                    if (full.Trades >= minimumFull)
                     {
                         var candidate = new Choice(variant, full, trades,
-                            Robustness(full, whole.Early, whole.Late),
-                            whole.Early, whole.Late);
-                        if (!fullRobust.TryGetValue(variant.Kind, out var current) ||
+                            full.Net, full, full, fullCurve);
+                        if (!fullProfit.TryGetValue(variant.Kind, out var previous) ||
+                            Better(full, variant.Id, previous.Score,
+                                previous.Variant.Id) ||
+                            full == previous.Score && variant.Id == previous.Variant.Id &&
+                            variant.SignalMode < previous.Variant.SignalMode)
+                            fullProfit[variant.Kind] = candidate;
+                        if (!fullWinRate.TryGetValue(variant.Kind, out previous) ||
+                            HigherWinRate(full, variant.Id, previous.Score,
+                                previous.Variant.Id) ||
+                            full == previous.Score && variant.Id == previous.Variant.Id &&
+                            variant.SignalMode < previous.Variant.SignalMode)
+                            fullWinRate[variant.Kind] = candidate;
+                    }
+
+                    for (var f = 0; f < folds.Length; f++)
+                    {
+                        var fold = folds[f];
+                        var early = foldScores[f].Early;
+                        var late = foldScores[f].Late;
+                        var train = foldScores[f].Train;
+                        var minimum = Math.Max(6, (fold.TrainingSessions + 5) / 6);
+                        var qualifies = train.Trades >= minimum &&
+                            early.Trades >= Math.Max(3, minimum / 4) &&
+                            late.Trades >= Math.Max(3, minimum / 4);
+                        if (!qualifies) continue;
+                        eligible[f]++;
+                        var candidate = new Choice(variant, train, trades,
+                            ConsistencyRobustness(train, early, late,
+                                foldScores[f].Curve),
+                            early, late, foldScores[f].Curve);
+                        if (!bestForFold[f].TryGetValue(variant.Kind, out var current) ||
                             BetterRobust(candidate, current))
-                            fullRobust[variant.Kind] = candidate;
+                            bestForFold[f][variant.Kind] = candidate;
                     }
                 }
-                if (full.Trades >= minimumFull)
-                {
-                    var candidate = new Choice(variant, full, trades,
-                        full.Net, full, full);
-                    if (!fullProfit.TryGetValue(variant.Kind, out var previous) ||
-                        Better(full, variant.Id, previous.Score, previous.Variant.Id))
-                        fullProfit[variant.Kind] = candidate;
-                    if (!fullWinRate.TryGetValue(variant.Kind, out previous) ||
-                        HigherWinRate(full, variant.Id, previous.Score,
-                            previous.Variant.Id))
-                        fullWinRate[variant.Kind] = candidate;
-                }
 
-                for (var f = 0; f < folds.Length; f++)
-                {
-                    var fold = folds[f];
-                    var early = foldScores[f].Early;
-                    var late = foldScores[f].Late;
-                    var train = foldScores[f].Train;
-                    var minimum = Math.Max(6, (fold.TrainingSessions + 5) / 6);
-                    var qualifies = train.Trades >= minimum &&
-                        early.Trades >= Math.Max(3, minimum / 4) &&
-                        late.Trades >= Math.Max(3, minimum / 4);
-                    if (!qualifies) continue;
-                    eligible[f]++;
-                    var candidate = new Choice(variant, train, trades,
-                        Robustness(train, early, late), early, late);
-                    if (!bestForFold[f].TryGetValue(variant.Kind, out var current) ||
-                        BetterRobust(candidate, current))
-                        bestForFold[f][variant.Kind] = candidate;
-                }
+                var completed = Interlocked.Increment(ref tested);
+                if (completed % 500 == 0)
+                    lock (progressLock)
+                        Console.WriteLine("Deep multi-strategy grid: " +
+                            completed.ToString("N0", Ci) + "/" +
+                            (2 * variants.Count).ToString("N0", Ci) +
+                            " directional evaluations");
             }
-
-            var completed = Interlocked.Increment(ref tested);
-            if (completed % 500 == 0)
-                lock (progressLock)
-                    Console.WriteLine("Deep multi-strategy grid: " +
-                        completed.ToString("N0", Ci) + "/" +
-                        variants.Count.ToString("N0", Ci));
-            if (variant.Kind == MultiStrategyKind.Orb && completed % 1200 == 0)
+            if (recipe.Kind == MultiStrategyKind.Orb &&
+                Volatile.Read(ref tested) % 1200 == 0)
                 OptimizationEngine.ClearCaches();
         }
 
@@ -260,6 +295,14 @@ public static class MultiStrategyRunner
                         EvaluateCandidate(variants[i]);
                 });
         }
+
+        // Per-fold direction/disable decisions depend ONLY on that fold's
+        // training prefix. The forward holdout is never inspected here.
+        for (var f = 0; f < bestForFold.Length; f++)
+            foreach (var kind in bestForFold[f].Keys.ToArray())
+                bestForFold[f][kind] = DisableWhenUnreliable(bestForFold[f][kind]);
+        foreach (var kind in fullRobust.Keys.ToArray())
+            fullRobust[kind] = DisableWhenUnreliable(fullRobust[kind]);
 
         HistoricalReplayRunner.FrozenPlan? lastFoldPlan = null;
         var chosenOos = new List<(int Fold, MultiStrategyTrade Trade)>();
@@ -316,6 +359,11 @@ public static class MultiStrategyRunner
                 individualOos[kind].AddRange(testTrades);
                 individualFoldResults[kind].Add(test.Net);
                 var reportLine = "  " + kind + ": config " + chosen.Variant.Id +
+                    " [" + chosen.Variant.SignalMode + "], profitable weeks " +
+                    chosen.Consistency.ProfitableWeeks + "/" +
+                    chosen.Consistency.TotalWeeks + ", months " +
+                    chosen.Consistency.ProfitableMonths + "/" +
+                    chosen.Consistency.TotalMonths +
                     ", train $" + F(chosen.Score.Net) +
                     " (early $" + F(chosen.Early.Net) +
                     ", late $" + F(chosen.Late.Net) +
@@ -620,6 +668,11 @@ public static class MultiStrategyRunner
                         selected.Variant.Id + ",train_net=" + F(selected.Score.Net) +
                         ",train_robustness=" + F(selected.Robustness) +
                         ",trades=" + selected.Score.Trades +
+                        ",positive_weeks=" + selected.Consistency.ProfitableWeeks +
+                        "/" + selected.Consistency.TotalWeeks +
+                        ",positive_months=" + selected.Consistency.ProfitableMonths +
+                        "/" + selected.Consistency.TotalMonths +
+                        ",best_week_profit_share=" + F(selected.Consistency.BestWeekShare) +
                         ",settings=" + selected.Variant.Parameters);
                 }
                 onSelected(HistoricalReplayRunner.FromSelection(
@@ -631,6 +684,23 @@ public static class MultiStrategyRunner
                     "No last-fold plan was selected for historical replay."));
         }
         return 0;
+    }
+
+    // If both original and reversed directions have inadequate TRAINING
+    // profitability/consistency, explicitly choose to trade neither one.
+    internal static Choice DisableWhenUnreliable(Choice selected)
+    {
+        if (selected.Score.Net > 0m && selected.Robustness > 0m)
+            return selected;
+        var empty = MultiScore.From(Array.Empty<MultiStrategyTrade>());
+        return selected with {
+            Variant = selected.Variant with { SignalMode = SignalMode.Disabled },
+            Score = empty,
+            Trades = new Dictionary<DateOnly, MultiStrategyTrade>(),
+            Robustness = 0m,
+            Early = empty,
+            Late = empty
+        };
     }
 
     // The same router choices and robustness ordering used in each
@@ -807,11 +877,47 @@ public static class MultiStrategyRunner
     {
         private int _trades, _wins;
         private decimal _net, _gross, _costs, _peak, _drawdown, _gains, _losses;
+        private DateOnly? _week;
+        private int? _month;
+        private decimal _weekNet, _monthNet;
+        private int _positiveWeeks, _positiveMonths;
+        private decimal _bestWeek, _positiveWeekGross;
+
+        private void CloseWeek()
+        {
+            if (_weekNet > 0m)
+            {
+                ++_positiveWeeks;
+                _positiveWeekGross += _weekNet;
+                _bestWeek = Math.Max(_bestWeek, _weekNet);
+            }
+        }
+        private void CloseMonth()
+        {
+            if (_monthNet > 0m) ++_positiveMonths;
+        }
+
         public void Add(MultiStrategyTrade trade)
         {
+            var week = MondayOf(trade.Day);
+            var month = trade.Day.Year * 12 + trade.Day.Month;
+            if (_week is not null && week != _week)
+            {
+                CloseWeek();
+                _weekNet = 0m;
+            }
+            if (_month is not null && month != _month)
+            {
+                CloseMonth();
+                _monthNet = 0m;
+            }
+            _week = week;
+            _month = month;
             ++_trades;
             var net = trade.Net;
             _net += net;
+            _weekNet += net;
+            _monthNet += net;
             _gross += trade.Gross;
             _costs += trade.Costs;
             if (trade.IsWin) { ++_wins; _gains += net; }
@@ -819,12 +925,42 @@ public static class MultiStrategyRunner
             _peak = Math.Max(_peak, _net);
             _drawdown = Math.Max(_drawdown, _peak - _net);
         }
+
         public MultiScore Finish() => new(_trades, _wins, _net, _gross, _costs,
             _drawdown, _losses > 0m ? _gains / _losses : null);
+
+        public CurveMetrics Curve(DateOnly first, DateOnly last)
+        {
+            var weeks = 1 + (MondayOf(last).DayNumber -
+                MondayOf(first).DayNumber) / 7;
+            var months = (last.Year - first.Year) * 12 +
+                last.Month - first.Month + 1;
+            var positiveWeek = _weekNet > 0m ? _weekNet : 0m;
+            return new CurveMetrics(
+                _positiveWeeks + (positiveWeek > 0m ? 1 : 0), weeks,
+                _positiveMonths + (_monthNet > 0m ? 1 : 0), months,
+                Math.Max(_bestWeek, positiveWeek),
+                _positiveWeekGross + positiveWeek);
+        }
     }
 
+    // Preserve the previous validation API for score-invariance regression.
     internal static (MultiScore Full, (MultiScore Early, MultiScore Late,
         MultiScore Train)[] Folds) ScoreCandidateRanges(
+        IReadOnlyDictionary<DateOnly, MultiStrategyTrade> trades,
+        IReadOnlyList<DateOnly> sessionDays, IReadOnlyList<WalkForwardFold> folds)
+    {
+        var detailed = ScoreCandidateRangesDetailed(trades, sessionDays, folds);
+        return (detailed.Full, detailed.Folds.Select(x =>
+            (x.Early, x.Late, x.Train)).ToArray());
+    }
+
+    // One chronological pass still computes every fold and half-range.
+    // Period summaries use the same close-of-trade P&L as MultiScore.
+    internal static (MultiScore Full,
+        (MultiScore Early, MultiScore Late, MultiScore Train,
+         CurveMetrics Curve)[] Folds, CurveMetrics FullCurve)
+        ScoreCandidateRangesDetailed(
         IReadOnlyDictionary<DateOnly, MultiStrategyTrade> trades,
         IReadOnlyList<DateOnly> sessionDays, IReadOnlyList<WalkForwardFold> folds)
     {
@@ -847,20 +983,44 @@ public static class MultiStrategyRunner
                 else late[f].Add(trade);
             }
         }
-        var scores = new (MultiScore Early, MultiScore Late, MultiScore Train)[folds.Count];
+        var scores = new (MultiScore Early, MultiScore Late,
+            MultiScore Train, CurveMetrics Curve)[folds.Count];
         for (var f = 0; f < folds.Count; f++)
-            scores[f] = (early[f].Finish(), late[f].Finish(), training[f].Finish());
-        return (full.Finish(), scores);
+        {
+            var fold = folds[f];
+            var mid = middle[f];
+            scores[f] = (early[f].Finish(), late[f].Finish(),
+                training[f].Finish(),
+                training[f].Curve(sessionDays[fold.TrainingStart],
+                    sessionDays[fold.TrainingEnd - 1]));
+        }
+        return (full.Finish(), scores,
+            full.Curve(sessionDays[0], sessionDays[^1]));
     }
 
     private static decimal Robustness(MultiScore total, MultiScore first, MultiScore second) =>
         total.Net - 0.5m * total.Drawdown -
         0.5m * (Math.Max(0m, -first.Net) + Math.Max(0m, -second.Net));
 
+    // Rewards positive equity growth across the calendar rather than a few
+    // isolated trades. Nothing is fitted to the next OOS block.
+    internal static decimal ConsistencyRobustness(
+        MultiScore total, MultiScore first, MultiScore second, CurveMetrics curve)
+    {
+        var basic = Robustness(total, first, second);
+        if (total.Net <= 0m) return basic;
+        return basic - total.Net * (
+            0.25m * (1m - curve.MonthRate) +
+            0.10m * (1m - curve.WeekRate) +
+            0.30m * Math.Max(0m, curve.BestWeekShare - 0.33m));
+    }
+
     private static bool BetterRobust(Choice a, Choice b) =>
         a.Robustness > b.Robustness ||
         a.Robustness == b.Robustness &&
-        Better(a.Score, a.Variant.Id, b.Score, b.Variant.Id);
+        (Better(a.Score, a.Variant.Id, b.Score, b.Variant.Id) ||
+         a.Score == b.Score && a.Variant.Id == b.Variant.Id &&
+         a.Variant.SignalMode < b.Variant.SignalMode);
 
     private static decimal SensitiveNet(MultiScore score, decimal costPerEs) =>
         score.Net - (costPerEs - 10m) * score.Trades;

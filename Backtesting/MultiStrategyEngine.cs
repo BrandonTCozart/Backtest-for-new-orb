@@ -25,7 +25,8 @@ public static class MultiStrategyEngine
     // worker evaluates a contiguous grid partition.
     private readonly record struct ExitKey(
         decimal StopAtr, decimal RewardRisk, MultiExitMode Mode,
-        decimal ActivateR, decimal DistanceAtr, bool BreakEven, int LevelLookback);
+        decimal ActivateR, decimal DistanceAtr, bool BreakEven, int LevelLookback,
+        SignalMode SignalMode);
     private const int MaxCachedExitsPerEntryRecipe = 40;
 
     private sealed class WorkerCache
@@ -132,6 +133,8 @@ public static class MultiStrategyEngine
         IReadOnlyList<SessionData> originalOrbSessions)
     {
         var result = new Dictionary<DateOnly, MultiStrategyTrade>();
+        if (variant.SignalMode == SignalMode.Disabled)
+            return result; // Explicit no-trade choice, including frozen replay.
         if (variant.Kind == MultiStrategyKind.Orb)
         {
             // Existing OrbStage stop engine and FVG rules, same as prior optimizer.
@@ -142,7 +145,9 @@ public static class MultiStrategyEngine
                 new RiskBand(variant.OrbRiskCap, variant.OrbFallbackRisk),
                 variant.OrbTrailDollars, 0,
                 variant.WeekdayMask, variant.EventRule);
-            var simulated = OptimizationEngine.Evaluate(orbConfig, originalOrbSessions, keepTrades: true);
+            var simulated = OptimizationEngine.Evaluate(orbConfig,
+                originalOrbSessions, keepTrades: true,
+                invertFirstSignal: variant.SignalMode == SignalMode.Reversed);
             foreach (var t in simulated.DetailedTrades ?? [])
             {
                 // There are no MES reversals in the multi-strategy grid.
@@ -168,7 +173,8 @@ public static class MultiStrategyEngine
 
         var key = new ExitKey(variant.StopAtrMultiple, variant.RewardRisk,
             variant.ExitMode, variant.TrailActivationR, variant.TrailAtrMultiple,
-            variant.TrailBreakeven, variant.TargetLookbackBars);
+            variant.TrailBreakeven, variant.TargetLookbackBars,
+            variant.SignalMode);
         if (!cache.Exits.TryGetValue(key, out var rawTrades))
         {
             rawTrades = new Dictionary<DateOnly, MultiStrategyTrade>();
@@ -209,6 +215,7 @@ public static class MultiStrategyEngine
     }
 
     public static MultiStrategyTrade? GenerateDay(MultiStrategyVariant v, MultiSession s) =>
+        v.SignalMode != SignalMode.Disabled &&
         WeekdaySelection.Includes(v.WeekdayMask, s.Day.DayOfWeek)
             ? MakeTrade(v, s, FindSignal(v, s)) : null;
 
@@ -219,8 +226,25 @@ public static class MultiStrategyEngine
         var bars = v.Slot == MultiStrategySlot.Overnight ? s.Overnight : s.Rth;
         if (bars is null) return null;
         var (_, _, lastExit) = Window(v);
-        return SimulateBracket(v, s, bars, signal.Value.Index + 1, lastExit,
-            signal.Value.Side, signal.Value.Atr, signal.Value.TargetPrice);
+        var entryIndex = signal.Value.Index + 1;
+        if (entryIndex >= bars.Length) return null;
+        var side = signal.Value.Side;
+        var target = signal.Value.TargetPrice;
+        if (v.SignalMode == SignalMode.Reversed)
+        {
+            side = side == TradeDirection.Long
+                ? TradeDirection.Short : TradeDirection.Long;
+            // A Fibonacci reference is on the ORIGINAL signal side.
+            // For fixed target testing retain its PRE-ENTRY distance (mirrored
+            // around next-open); for real structure targets use only genuine
+            // opposite-side structure, never a manufactured price level.
+            if (v.ExitMode == MultiExitMode.StructureTarget)
+                target = null;
+            else if (target is decimal known)
+                target = 2m * bars[entryIndex].C.O - known;
+        }
+        return SimulateBracket(v, s, bars, entryIndex, lastExit,
+            side, signal.Value.Atr, target);
     }
 
     private static (int First, int LastSignal, int LastExit) Window(

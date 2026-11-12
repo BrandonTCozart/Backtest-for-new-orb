@@ -28,10 +28,10 @@ public static class OptimizationEngine
 
     public static OptimizationResult Evaluate(
         OptimizationConfig config, IReadOnlyList<SessionData> sessions,
-        bool keepTrades = false)
+        bool keepTrades = false, bool invertFirstSignal = false)
     {
         Validate(config);
-        return Aggregate(config, ComputeDayOutcomes(config, sessions), keepTrades);
+        return Aggregate(config, ComputeDayOutcomes(config, sessions, invertFirstSignal), keepTrades);
     }
 
     // Simulate the expensive intraday entry/stop logic only ONCE per base
@@ -146,7 +146,8 @@ public static class OptimizationEngine
     }
 
     private static List<DayOutcome> ComputeDayOutcomes(
-        OptimizationConfig config, IReadOnlyList<SessionData> sessions)
+        OptimizationConfig config, IReadOnlyList<SessionData> sessions,
+        bool invertFirstSignal = false)
     {
         var outcomes = new List<DayOutcome>(sessions.Count);
         var logic = new OrbStrategy { EsTrailingDistance = config.EsTrailDollars };
@@ -160,8 +161,15 @@ public static class OptimizationEngine
                 continue;
             }
 
+            // Reversal preserves the original trigger candle and the next-open
+            // execution; the complete opposite-side ORB stop/stage path is
+            // simulated from scratch. It is NOT a negated P&L calculation.
+            var tradedSide = invertFirstSignal
+                ? entry.Side == TradeDirection.Long
+                    ? TradeDirection.Short : TradeDirection.Long
+                : entry.Side;
             var first = SimulateCached(session, logic, entry.SignalIndex,
-                entry.Side, config.EsQuantity, isMes: false,
+                tradedSide, config.EsQuantity, isMes: false,
                 config.Risk.MaxRisk, config.Risk.FallbackRisk,
                 config.EsTrailDollars);
 

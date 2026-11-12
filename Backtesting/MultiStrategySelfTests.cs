@@ -127,6 +127,8 @@ public static class MultiStrategySelfTests
             TestTrailingStops(session);
             TestNewExitModes(session);
             TestFastScoringAndExitReuse(session);
+            TestConsistencySelection(date);
+            TestOppositeOrbExecution(date);
             TestPriceActionSignals(date, folder);
             TestFallbackRouting(date, session, variants);
             TestCausalContractRoll();
@@ -865,6 +867,87 @@ public static class MultiStrategySelfTests
         Console.WriteLine("PASS: point-in-time regime cutoffs and no-trade classes.");
     }
 
+    private static void TestConsistencySelection(DateOnly date)
+    {
+        // Equal-profit curves: eight modest positive weeks should outrank
+        // one lucky spike when drawdown and total P&L are identical.
+        var dates = Enumerable.Range(0, 8)
+            .Select(i => new DateOnly(2026, 6, 1).AddDays(i * 7)).ToArray();
+        MultiStrategyTrade Trade(DateOnly d, decimal gross) =>
+            new(d, MultiStrategyKind.MorningMomentum, 10, "ESU6",
+                TradeDirection.Long, MarketTime.ToUtc(d, new TimeOnly(10, 0)),
+                MarketTime.ToUtc(d, new TimeOnly(10, 1)),
+                100m, 100m + gross / 50m, 500m, "synthetic");
+        var steady = dates.ToDictionary(d => d, d => Trade(d, 110m));
+        var lucky = new Dictionary<DateOnly, MultiStrategyTrade> {
+            [dates[0]] = Trade(dates[0], 810m)
+        };
+        var folds = new[] { new WalkForwardFold(1, 0, dates.Length, 0, 0) };
+        var first = MultiStrategyRunner.ScoreCandidateRangesDetailed(
+            steady, dates, folds);
+        var second = MultiStrategyRunner.ScoreCandidateRangesDetailed(
+            lucky, dates, folds);
+        Ensure(first.Full.Net == second.Full.Net &&
+               first.Full.Drawdown == second.Full.Drawdown &&
+               first.FullCurve.ProfitableWeeks == 8 &&
+               second.FullCurve.ProfitableWeeks == 1 &&
+               first.FullCurve.BestWeekShare < second.FullCurve.BestWeekShare,
+            "Consistent and concentrated synthetic curves must have equal "
+            + "net P&L but different distribution across weeks.");
+        var equal = MultiScore.From(steady.Values);
+        var steadyScore = MultiStrategyRunner.ConsistencyRobustness(
+            equal, equal, equal, first.FullCurve);
+        var luckyScore = MultiStrategyRunner.ConsistencyRobustness(
+            equal, equal, equal, second.FullCurve);
+        Ensure(steadyScore > luckyScore,
+            "Consistency-aware ranking should prefer smoother positive equity.");
+        var variant = new MultiStrategyVariant(10,
+            MultiStrategyKind.MorningMomentum, 10, .5m, 1m, 2m, 0m,
+            0, 0m, EconomicEventRule.Off);
+        var choice = new MultiStrategyRunner.Choice(variant, equal, steady,
+            steadyScore, equal, equal, first.FullCurve);
+        Ensure(MultiStrategyRunner.DisableWhenUnreliable(choice) == choice,
+            "Profitable robust training choices must remain enabled.");
+        var disabled = MultiStrategyRunner.DisableWhenUnreliable(
+            choice with { Robustness = -1m });
+        Ensure(disabled.Variant.SignalMode == SignalMode.Disabled &&
+               disabled.Score.Trades == 0 && disabled.Trades.Count == 0,
+            "Negative risk/consistency-adjusted training choices must be disabled.");
+        Console.WriteLine("PASS: calendar equity-curve consistency and no-trade selection.");
+    }
+
+    private static void TestOppositeOrbExecution(DateOnly date)
+    {
+        var raw = CreateFullSession(date);
+        var sessions = MultiStrategyData.Build(raw, raw, "unused");
+        var orb = OptimizationData.Prepare(raw, raw)
+            .Where(x => x.Range is not null).ToArray();
+        Ensure(orb.Length == 1 && sessions.Count == 1,
+            "ORB reverse fixtures must have a completed opening range.");
+        var candidate = new MultiStrategyVariant(2099,
+            MultiStrategyKind.Orb, 0, 0m, 0m, 0m, 0m,
+            90, 150m, EconomicEventRule.Off);
+        var original = MultiStrategyEngine.Generate(candidate, sessions, orb);
+        var reversed = MultiStrategyEngine.Generate(candidate with {
+            SignalMode = SignalMode.Reversed
+        }, sessions, orb);
+        Ensure(original.Count == 1 && reversed.Count == 1,
+            "ORB must simulate both a genuine original and reversed signal.");
+        var a = original.Values.Single();
+        var b = reversed.Values.Single();
+        Ensure(a.EntryAt == b.EntryAt && a.Entry == b.Entry &&
+               a.Side != b.Side &&
+               a.Costs == b.Costs && a.ExitAt > a.EntryAt &&
+               b.ExitAt > b.EntryAt,
+            "Opposite ORB must keep the original signal and next-open "
+            + "execution while independently calculating its stop and stages.");
+        Ensure(MultiStrategyEngine.Generate(candidate with {
+            SignalMode = SignalMode.Disabled
+        }, sessions, orb).Count == 0,
+            "Disabled ORB cannot emit a trade.");
+        Console.WriteLine("PASS: true reversed ORB stop/stage execution and disabled mode.");
+    }
+
     private static void TestWeeklyTotals(DateOnly date)
     {
         // Monday 2026-08-31; first and last weeks are included even with
@@ -1006,6 +1089,21 @@ public static class MultiStrategySelfTests
                 kind + " must enter only at the next bar's open.");
             Ensure(executed!.InitialRiskDollars <= 600m,
                 kind + " must respect the bracket risk cap.");
+            var inverted = MultiStrategyEngine.GenerateDay(variant with {
+                SignalMode = SignalMode.Reversed
+            }, session);
+            Ensure(inverted is not null &&
+                   inverted.EntryAt == executed.EntryAt &&
+                   inverted.Entry == executed.Entry &&
+                   inverted.Side == TradeDirection.Short &&
+                   inverted.InitialRiskDollars <= 600m &&
+                   inverted.Costs == executed.Costs,
+                kind + " reversed trade must keep its signal timestamp "
+                + "but simulate the actual short-side bracket.");
+            Ensure(MultiStrategyEngine.GenerateDay(variant with {
+                SignalMode = SignalMode.Disabled
+            }, session) is null,
+                kind + " disabled strategy cannot emit trades.");
 
             // A dramatic spike AFTER the chosen signal must not change it.
             var postSignalBar = raw.FindIndex(b =>

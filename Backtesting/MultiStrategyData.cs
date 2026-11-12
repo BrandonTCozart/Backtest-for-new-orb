@@ -37,6 +37,10 @@ public enum PriceLevelSource { OpeningRange, PreviousCompleteRth, Overnight, Rol
 // tests and short iterations; it must never silently be reported as Deep.
 public enum MultiSearchProfile { Smoke, Deep }
 
+// The signal's observation timestamp never changes between orientations.
+// Disabled is a training-selected no-trade alternative, not a future-aware stop.
+public enum SignalMode { Original, Reversed, Disabled }
+
 // Non-ORB exit modes. ORB retains its own staged engine.
 public enum MultiExitMode {
     FixedTarget, TrailingStop, StructureTarget, StagedProfitLock, TargetThenTrail
@@ -65,7 +69,8 @@ public sealed record MultiStrategyVariant(
     decimal TrailActivationR = 0m,
     decimal TrailAtrMultiple = 0m,
     bool TrailBreakeven = false,
-    int TargetLookbackBars = 0)
+    int TargetLookbackBars = 0,
+    SignalMode SignalMode = SignalMode.Original)
 {
     public MultiStrategySlot Slot => ResearchSlot ?? (Kind switch
     {
@@ -98,7 +103,8 @@ public sealed record MultiStrategyVariant(
         $"exit_mode={ExitMode}", $"trail_activation_R={TrailActivationR}",
         $"trail_distance_ATR={TrailAtrMultiple}",
         $"trail_breakeven={TrailBreakeven}",
-        $"structure_lookback_bars={TargetLookbackBars}");
+        $"structure_lookback_bars={TargetLookbackBars}",
+        $"signal_mode={SignalMode}");
 }
 
 public sealed class MultiIndicators

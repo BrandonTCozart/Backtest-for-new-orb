@@ -44,12 +44,27 @@ public static class HistoricalReplayRunner
         MultiStrategyVariant Variant, MultiScore Train, MultiScore Early,
         MultiScore Late, decimal Robustness);
 
+    internal sealed record FrozenComparison(
+        IReadOnlyDictionary<MultiStrategyKind, FrozenChoice> BaselineChoices,
+        MultiPortfolioPolicy BaselinePolicy,
+        AdaptiveConfigurationMode Mode,
+        IReadOnlyDictionary<MultiStrategyKind, FrozenChoice>? PlainAdaptiveChoices = null,
+        MultiPortfolioPolicy? PlainAdaptivePolicy = null,
+        AdaptiveConfigurationModel? PlainAdaptiveExperts = null);
+
     internal sealed record FrozenPlan(
         DateOnly TrainingFrom, DateOnly TrainingThrough,
         IReadOnlyDictionary<MultiStrategyKind, FrozenChoice> Choices,
         MultiPortfolioPolicy? SelectedPolicy = null,
         MultiPortfolioPolicy? RegimeComparisonPolicy = null,
-        AdaptiveConfigurationModel? AdaptiveExperts = null);
+        AdaptiveConfigurationModel? AdaptiveExperts = null,
+        FrozenComparison? Comparison = null);
+
+    internal static IReadOnlyDictionary<MultiStrategyKind, FrozenChoice> FreezeChoices(
+        IReadOnlyDictionary<MultiStrategyKind, MultiStrategyRunner.Choice> selected) =>
+        selected.ToDictionary(x => x.Key, x => new FrozenChoice(
+            x.Value.Variant, x.Value.Score, x.Value.Early,
+            x.Value.Late, x.Value.Robustness));
 
     // Called by the sequential run ONLY after fold 5's optimizer has finished
     // selecting with MES_DATA training P&L. No historical P&L enters this plan.
@@ -58,7 +73,8 @@ public static class HistoricalReplayRunner
         IReadOnlyDictionary<MultiStrategyKind, MultiStrategyRunner.Choice> chosen,
         MultiPortfolioPolicy selectedPolicy,
         MultiPortfolioPolicy? regimeComparison = null,
-        AdaptiveConfigurationModel? adaptiveExperts = null)
+        AdaptiveConfigurationModel? adaptiveExperts = null,
+        FrozenComparison? comparison = null)
     {
         var selected = chosen.Keys.OrderBy(k => k).ToArray();
         var all = Enum.GetValues<MultiStrategyKind>();
@@ -69,10 +85,8 @@ public static class HistoricalReplayRunner
                 "training-selected strategy set. Missing winners may not be " +
                 "silently replaced with stale configuration IDs.");
         return new FrozenPlan(trainingFrom, trainingThrough,
-            chosen.ToDictionary(x => x.Key, x => new FrozenChoice(
-                x.Value.Variant, x.Value.Score, x.Value.Early,
-                x.Value.Late, x.Value.Robustness)), selectedPolicy,
-            regimeComparison, adaptiveExperts);
+            FreezeChoices(chosen), selectedPolicy,
+            regimeComparison, adaptiveExperts, comparison);
     }
 
     // Default run: (1) freshly re-optimize and walk-forward test MES_DATA,
@@ -414,6 +428,54 @@ public static class HistoricalReplayRunner
                 F(regimeComparison.Score.WinRate) + "," +
                 F(regimeComparison.Score.Drawdown) + "," +
                 regimeComparison.FallbackTrades);
+
+        // Compare the SAME future period under separately frozen,
+        // training-only baseline, adaptive, and optional candle selectors.
+        if (plan.Comparison is { } diagnostic)
+        {
+            MultiScore ReplayAlternative(
+                IReadOnlyDictionary<MultiStrategyKind, FrozenChoice> frozenChoices,
+                MultiPortfolioPolicy policy,
+                AdaptiveConfigurationModel? experts)
+            {
+                var alternatives = new Dictionary<MultiStrategyKind,
+                    MultiStrategyRunner.Choice>();
+                foreach (var (kind, frozen) in frozenChoices)
+                {
+                    var trades = experts is null
+                        ? MultiStrategyEngine.Generate(frozen.Variant, sessions, orb)
+                        : new Dictionary<DateOnly, MultiStrategyTrade>();
+                    alternatives[kind] = new MultiStrategyRunner.Choice(
+                        frozen.Variant, frozen.Train, trades, frozen.Robustness,
+                        frozen.Early, frozen.Late);
+                }
+                if (experts is not null)
+                    alternatives = AdaptiveConfigurationEngine.Apply(
+                        experts, alternatives, sessions, orb, -1, -1);
+                return MultiStrategyRunner.EvaluatePortfolio(
+                    policy, alternatives, sessions, 0, sessions.Count).Score;
+            }
+
+            var baselineScore = ReplayAlternative(
+                diagnostic.BaselineChoices, diagnostic.BaselinePolicy, null);
+            var plainScore = diagnostic.PlainAdaptiveChoices is not null &&
+                diagnostic.PlainAdaptivePolicy is not null
+                ? ReplayAlternative(diagnostic.PlainAdaptiveChoices,
+                    diagnostic.PlainAdaptivePolicy, diagnostic.PlainAdaptiveExperts)
+                : original.Score;
+            var candleComparison = diagnostic.Mode ==
+                AdaptiveConfigurationMode.AdaptiveCandles;
+            Console.WriteLine("REPLAY_EXPERT_COMPARE,baseline_net=" +
+                F(baselineScore.Net) + ",baseline_trades=" + baselineScore.Trades +
+                ",adaptive_net=" + F(plainScore.Net) +
+                ",adaptive_trades=" + plainScore.Trades +
+                ",candles_net=" + (candleComparison
+                    ? F(original.Score.Net) : "n/a") +
+                ",candles_trades=" + (candleComparison
+                    ? original.Score.Trades.ToString(Ci) : "n/a") +
+                ",selected_net=" + F(original.Score.Net) +
+                ",selected_policy=" + selectedPolicy.Description);
+        }
 
         // In forward mode all evaluation trades are strictly later than training.
         Console.WriteLine();

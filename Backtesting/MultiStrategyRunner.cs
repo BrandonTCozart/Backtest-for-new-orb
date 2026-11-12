@@ -733,9 +733,29 @@ public static class MultiStrategyRunner
                         string.Join(", ", missing) +
                         ". Cannot silently skip a family or use forward data for selection.");
                 AdaptiveConfigurationModel? frozenExperts = null;
+                HistoricalReplayRunner.FrozenComparison? comparison = null;
                 IReadOnlyDictionary<MultiStrategyKind, Choice> frozenChoices = fullRobust;
                 if (configurationMode != AdaptiveConfigurationMode.Baseline)
                 {
+                    var baselinePolicy = SelectTrainingRouter(
+                        fullRobust, sessions, 0, sessions.Count).Selected;
+                    var plainExperts = AdaptiveConfigurationEngine.Select(
+                        fullRobust, fullAdaptivePool, sessions, 0, sessions.Count,
+                        allowCandleFilter: false);
+                    var plainChoices = AdaptiveConfigurationEngine.Apply(
+                        plainExperts, fullRobust, sessions, originalOrb,
+                        0, sessions.Count);
+                    var plainPolicy = SelectTrainingRouter(
+                        plainChoices, sessions, 0, sessions.Count).Selected;
+                    comparison = new HistoricalReplayRunner.FrozenComparison(
+                        HistoricalReplayRunner.FreezeChoices(fullRobust),
+                        baselinePolicy, configurationMode,
+                        configurationMode == AdaptiveConfigurationMode.AdaptiveCandles
+                            ? HistoricalReplayRunner.FreezeChoices(plainChoices) : null,
+                        configurationMode == AdaptiveConfigurationMode.AdaptiveCandles
+                            ? plainPolicy : null,
+                        configurationMode == AdaptiveConfigurationMode.AdaptiveCandles
+                            ? plainExperts : null);
                     frozenExperts = AdaptiveConfigurationEngine.Select(
                         fullRobust, fullAdaptivePool, sessions, 0, sessions.Count,
                         allowCandleFilter: configurationMode ==
@@ -782,7 +802,7 @@ public static class MultiStrategyRunner
                 }
                 onSelected(HistoricalReplayRunner.FromSelection(
                     sessions[0].Day, sessions[^1].Day, frozenChoices,
-                    policy, bestRegime, frozenExperts));
+                    policy, bestRegime, frozenExperts, comparison));
             }
             else
                 onSelected(lastFoldPlan ?? throw new InvalidOperationException(

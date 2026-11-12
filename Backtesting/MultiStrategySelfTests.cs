@@ -422,6 +422,51 @@ public static class MultiStrategySelfTests
                 "Frozen five-family replay must never add excluded strategies.");
             Console.WriteLine("PASS: frozen five-family replay stays focused.");
 
+            // Both the expert map and all three comparison configurations are
+            // frozen from training. Replay must use those exact inputs and
+            // report their forward-like performance independently.
+            var testExperts = new AdaptiveConfigurationModel(
+                focusedChoices.ToDictionary(
+                    x => x.Key,
+                    x => (IReadOnlyDictionary<AdaptiveMarketState,
+                        AdaptiveConfigurationRule>)new Dictionary<
+                            AdaptiveMarketState, AdaptiveConfigurationRule> {
+                        [AdaptiveMarketState.Trend] =
+                            new(x.Value.Variant, CandleFeatureRule.None),
+                        [AdaptiveMarketState.Range] =
+                            new(x.Value.Variant, CandleFeatureRule.RejectionOrEngulfing)
+                    }));
+            var comparison = new HistoricalReplayRunner.FrozenComparison(
+                HistoricalReplayRunner.FreezeChoices(focusedChoices),
+                focusedPolicy, AdaptiveConfigurationMode.AdaptiveCandles,
+                HistoricalReplayRunner.FreezeChoices(focusedChoices),
+                focusedPolicy, testExperts);
+            var comparedPlan = focusedPlan with {
+                AdaptiveExperts = testExperts,
+                Comparison = comparison
+            };
+            using var comparedReplay = new StringWriter();
+            try
+            {
+                Console.SetOut(comparedReplay);
+                Ensure(HistoricalReplayRunner.Replay(
+                    comparedPlan, syntheticYear, syntheticYear) == 0,
+                    "Adaptive five-family frozen comparison replay must succeed.");
+            }
+            finally
+            {
+                Console.SetOut(regularOut);
+            }
+            var diagnostic = comparedReplay.ToString();
+            Ensure(diagnostic.Contains("REPLAY_EXPERT_COMPARE,baseline_net=") &&
+                   diagnostic.Contains(",adaptive_net=") &&
+                   diagnostic.Contains(",candles_net=") &&
+                   diagnostic.Contains("REPLAY_EXPERT,MorningVwapReversion,Trend,") &&
+                   !diagnostic.Contains("REPLAY_TOTAL,MorningMomentum,"),
+                "Frozen expert baseline/adaptive/candle comparisons must " +
+                "be reported without introducing excluded strategy families.");
+            Console.WriteLine("PASS: frozen baseline/adaptive/candle forward comparisons.");
+
             // Regression of frozen historical replay: no SQL, no new fit on
             // historical candles, no file outputs, full weekly reconciliation.
             var frozen = HistoricalReplayRunner.BuildPlan(

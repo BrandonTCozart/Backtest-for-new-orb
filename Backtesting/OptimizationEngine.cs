@@ -399,8 +399,25 @@ public static class OptimizationEngine
         var initial = logic.CalculateInitialStop(side, entry, orb,
             allowance: 10m * qty, pointValue: value, quantity: qty,
             maxInitialRisk: riskCap, defaultInitialStopRisk: fallbackRisk);
+        // A breakout strategy inverted to the opposite side often has its
+        // ORB-derived stop on the WRONG side of the new position. Instead of
+        // rejecting the reversed trade (selection bias), use an actual
+        // tick-rounded fallback stop within the original dollar risk cap.
         if (side == TradeDirection.Long ? initial.Stop >= entry : initial.Stop <= entry)
-            return null;
+        {
+            var available = Math.Min(fallbackRisk, riskCap - 10m * qty);
+            if (available <= 0m) return null;
+            var points = Math.Floor(
+                available / (value * qty) / OrbStrategy.TickSize) *
+                OrbStrategy.TickSize;
+            if (points < OrbStrategy.TickSize) return null;
+            initial = new InitialStopCalculation {
+                Stop = side == TradeDirection.Long
+                    ? entry - points : entry + points,
+                EstimatedRisk = points * value * qty + 10m * qty,
+                UsedFallback = true
+            };
+        }
 
         var levels = side == TradeDirection.Long ? day.LongReferences : day.ShortReferences;
         var trade = logic.CreateTrade(side, entryBar.Contract, qty, entry,

@@ -932,7 +932,8 @@ public static class MultiStrategySelfTests
             SignalMode = SignalMode.Reversed
         }, sessions, orb);
         Ensure(original.Count == 1 && reversed.Count == 1,
-            "ORB must simulate both a genuine original and reversed signal.");
+            "ORB must simulate both a genuine original and reversed signal " +
+            "(original=" + original.Count + ", reversed=" + reversed.Count + ").");
         var a = original.Values.Single();
         var b = reversed.Values.Single();
         Ensure(a.EntryAt == b.EntryAt && a.Entry == b.Entry &&

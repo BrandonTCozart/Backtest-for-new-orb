@@ -1,6 +1,6 @@
 # ES Multi-Strategy Backtester + Original ORB Optimizer
 
-Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The current default runs a **focused five-family** chronological research experiment: it selects from **235,008 base configurations (470,016 original/reversed directional evaluations)** on `dbo.MES_DATA_2020_2025`, freezes the training-selected regime-specific configurations and portfolio router, and evaluates them **unchanged** on `dbo.MES_DATA` (2025–2026). Set `Backtest:StrategyScope=Full` to restore the complete **19-family, 587,520-base-configuration (1,175,040-directional-evaluation)** search. Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
+Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The **current default is `OpeningDirectionResearch`**, a fast, single-threaded, exploratory study of the first 15-minute price path and premarket direction. It does **not** optimize ORB strategies or simulate trades. The earlier portfolio / ORB experiment modes remain available by changing `Backtest:Mode`. Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
 
 
 ### Adaptive configurations and candle features (November 2026)
@@ -60,7 +60,36 @@ The **RegimeAware** portfolio router competes against the existing single, fixed
 
 Regime thresholds are selected exclusively from training history (small, disclosed 16-threshold grid, optionally with chronological fallbacks), with frozen choices evaluated on later OOS dates. The console reports `FOLD_REGIME_COMPARE` for each fold and `REPLAY_REGIME_COMPARE`, `REPLAY_REGIME_AUDIT`, `REPLAY_TOTAL,RegimeComparison`, plus weekly and yearly regime comparison rows in the later frozen evaluation. This reports a trained regime alternative even when another router wins the training selection. These improvements **change which sessions and contracts enter the backtest**: older performance numbers and previously frozen configuration IDs are **not directly comparable**, and real SQL re-optimization/replay is required. The synthetic suite tests future-volume roll avoidance, decision cutoffs, future-bar immunity, six regime states, and parallel/serial parity. No actual SQL outcomes have been measured by CI.
 
-## Replay the previously observed 80.95% ORB Group 3 setup (current default)
+## New: 15-minute line-shape and premarket directional research (current default)
+
+Set `Backtest:Mode` to `OpeningDirectionResearch` and optionally `Backtest:ShapePatternGroups` to **5** (allowed **2–8**). Pull latest `main`, launch in Release with the existing read-only SQL connection; this is an exploratory **probability/correlation study**, not a profitable-trading claim or ORB order execution.
+
+**What is measured (all times New York / ET):**
+
+- **Premarket price change** over three separately validated, complete, contiguous, **same-contract** windows: previous calendar day's 18:00 to 09:29; current day 04:00 to 09:29; current day 08:00 to 09:29. Each trend is UP, DOWN or FLAT using a predeclared **±1 ES-point** deadband; missing windows are reported as missing and **never imputed as zero**.
+- **Actual opening line shape:** all **15 consecutive 09:30–09:44 minute closes**, each normalized relative to the 09:30 open by the complete opening-window high–low range. Fit **deterministic K-means** centroids from **historical TRAIN only**; output each full 15-point centroid path and its training membership. Unlike the prior combined cluster model, this model groups **only price-path shape**, not volume or future price movement. Five groups is a chosen baseline, **not an optimized or scientifically established number**.
+- **Outcome at 09:45:** first opening-range high/low boundary touched **after** 09:45, up to 10:59; **both in the same minute = AMBIGUOUS**, neither = NONE. Also report the 09:45-to-15:59 closing direction (known only later).
+- **Premarket-only prediction outcomes:** the 09:30–09:44 net opening direction, the breakout direction after 09:45, and the entire regular-session 09:30-to-15:59 net direction. All direction labels have a one-tick **±0.25 ES-point** near-flat deadband.
+
+**Testing procedure:** Older SQL history is divided chronologically **60% training, 20% validation, 20% previously examined historical test**. Train 15-point shape centroids and directional probabilities *only on the first 60%*. The same frozen shapes/probabilities are evaluated on both later historical blocks and on the disjoint **2025–2026** table, with no refit. The two test windows have **already been inspected by this research project**, so they are chronological replays, not pristine new evidence.
+
+The direction model estimates a **conditional** P(up) against P(down) for clear breakout and post-09:45 close direction, with a 20-observation prior-weight shrinkage; joint shape+04:00 premarket cells with under 15 **training observations** fall back to shape-only. It outputs validation/test Brier scores, accuracy and high-confidence coverage against a constant training-frequency baseline. **No direction model is fitted to premarket or shape outcomes from the holdout.** Binary accuracy/Brier scores **exclude flat, no-break and ambiguous target days**; the counts of those outcomes are separately disclosed. A P(up) conditional on a directional breakout is *not* itself the unconditional probability that a trade can be executed.
+
+**Console result prefixes:**
+
+- `DIRECTION_RESEARCH_SPLIT` — date ranges and counts.
+- `DIRECTION_RESEARCH_SHAPE` — 15-point path centroids with training memberships and ranges.
+- `DIRECTION_RESEARCH_PREMARKET` — 18:00, 04:00 and 08:00 premarket signs versus opening 15, breakout, post-09:45 and full-session directions.
+- `DIRECTION_RESEARCH_CORRELATION` — actual Pearson *r* between premarket point change and each outcome (with pair counts; excludes ambiguous/flat outcomes).
+- `DIRECTION_RESEARCH_CONDITIONAL` — shape × 04:00-pre-market joint directional frequencies, broken down by period.
+- `DIRECTION_RESEARCH_FORECAST` — frozen baseline vs premarket-only vs shape-only vs combined Brier/accuracy/coverage.
+- `DIRECTION_RESEARCH_SQL_SECONDS`, `DIRECTION_RESEARCH_REPORT_SECONDS`, `DIRECTION_RESEARCH_TOTAL_SECONDS` — simple runtime counters for performance comparisons.
+
+**Performance improvements, without multicore parallelism:** This mode processes a complete RTH session only once, uses binary search on already sorted active-contract bars to locate each UTC-aligned window, computes just the opening line, premarket changes and labels (no multi-strategy indicators, 930-minute per-session regime indicators, ORB parameter searches or trade-simulation caches), and trains small shape centroids from only 15 values. No `ParallelWorkers` are used. The SQL loader still retains read-only cross-contract bars to select contracts causally; data-loading time is measured separately.
+
+**Interpretation limits:** Direction correlations can be unstable or noncausal; simultaneous correlated inputs should not simply be added together as if independent. Positive movement prediction is not sufficient for profitable trade execution after costs. One-minute candle OHLC is not tick-by-tick order flow and cannot order opposite boundary touches inside the same minute. No news/sector/week-trend integration yet—those are intentionally deferred until the price and premarket hypotheses have been evaluated.
+
+## Replay the previously observed 80.95% ORB Group 3 setup (previous experiment)
 
 Set `Backtest:Mode` to **`OrbGroup3Replay`** (current default), then run in Release with your existing SQL credentials. This is a standalone **research-only backtest**, not a trading switch.
 

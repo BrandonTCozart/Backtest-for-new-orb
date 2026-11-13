@@ -164,6 +164,7 @@ public static class MultiStrategySelfTests
             TestAdaptiveCandlestickCausality(date, folder);
             TestOrbOpeningPatternFeatures(date, folder);
             TestOrbResearchProgress();
+            TestOpeningDirectionResearch(date);
             Ensure(OrbGroup3ReplayRunner.FrozenVariant ==
                 (deepVariants.Single(x => x.Id == 14051) with {
                     SignalMode = SignalMode.Reversed
@@ -607,6 +608,125 @@ public static class MultiStrategySelfTests
         }
     }
 
+
+    private static void TestOpeningDirectionResearch(DateOnly date)
+    {
+        var market = CreateFullSession(date).OrderBy(x => x.T).ToArray();
+        var first = OpeningDirectionResearch.Extract(market);
+        Ensure(first.Length == 1 &&
+               first[0].Shape.Length == 15 &&
+               first[0].FourAm.Available &&
+               first[0].EightAm.Available &&
+               first[0].Overnight.Available &&
+               !first[0].HasGap,
+            "Direction research must use complete, same-contract premarket " +
+            "and the fifteen completed opening candles.");
+
+        var lastRth = MarketTime.ToUtc(date, new TimeOnly(15, 59));
+        var changed = market.Select(x =>
+        {
+            if (x.T != lastRth) return x;
+            var c = x.C;
+            return x with {
+                C = new Candle {
+                    T = c.T, O = c.O, H = c.H + 100m,
+                    L = c.L, C = c.C + 100m, V = c.V
+                }
+            };
+        }).ToArray();
+        var future = OpeningDirectionResearch.Extract(changed).Single();
+        Ensure(first[0].Shape.SequenceEqual(future.Shape) &&
+               first[0].FourAm == future.FourAm &&
+               first[0].Overnight == future.Overnight &&
+               first[0].Opening15 == future.Opening15 &&
+               first[0].RestOfDayPoints != future.RestOfDayPoints,
+            "Changing the future RTH close cannot alter premarket, " +
+            "the 09:45 line shape or opening direction.");
+
+        var missingFour = market.Where(x =>
+            x.T != MarketTime.ToUtc(date, new TimeOnly(6, 0))).ToArray();
+        var missing = OpeningDirectionResearch.Extract(missingFour).Single();
+        Ensure(!missing.FourAm.Available && !missing.Overnight.Available &&
+               missing.EightAm.Available &&
+               missing.Shape.SequenceEqual(first[0].Shape),
+            "Missing premarket minutes must not fabricate a trend or " +
+            "eliminate the valid regular-session shape.");
+
+        var missingRth = market.Where(x =>
+            x.T != MarketTime.ToUtc(date, new TimeOnly(9, 40))).ToArray();
+        Ensure(OpeningDirectionResearch.Extract(missingRth).Length == 0,
+            "Incomplete opening window must be excluded entirely.");
+
+        var high = market.Where(x => x.T >= MarketTime.ToUtc(date, new TimeOnly(9, 30)) &&
+                                     x.T < MarketTime.ToUtc(date, new TimeOnly(9, 45)))
+            .Max(x => x.C.H);
+        var low = market.Where(x => x.T >= MarketTime.ToUtc(date, new TimeOnly(9, 30)) &&
+                                    x.T < MarketTime.ToUtc(date, new TimeOnly(9, 45)))
+            .Min(x => x.C.L);
+        var bothSides = market.Select(x =>
+        {
+            if (x.T != MarketTime.ToUtc(date, new TimeOnly(9, 45))) return x;
+            var c = x.C;
+            return x with {
+                C = new Candle {
+                    T = c.T, O = c.O, C = c.C, V = c.V,
+                    H = high + 100m, L = low - 100m
+                }
+            };
+        }).ToArray();
+        Ensure(OpeningDirectionResearch.Extract(bothSides).Single().FirstBreakBy11 ==
+               OpeningDirectionResearch.Outcome.Ambiguous,
+            "A one-minute bar breaking BOTH opening boundaries must " +
+            "be classified as ambiguous instead of choosing a winner.");
+
+        var sample = Enumerable.Range(0, 60).Select(i =>
+        {
+            var shape = Enumerable.Range(0, 15)
+                .Select(j => (i % 3 - 1) * (j + 1) / 15.0 +
+                    (i % 5 == 0 ? Math.Sin(j) * 0.2 : 0))
+                .ToArray();
+            var bullish = i % 3 == 2;
+            var trend = bullish ? OpeningDirectionResearch.Outcome.Up :
+                OpeningDirectionResearch.Outcome.Down;
+            return first[0] with {
+                Day = date.AddDays(i),
+                Shape = shape,
+                FourAm = new OpeningDirectionResearch.PreMove(true,
+                    bullish ? 5 : -5, bullish ? 1 : -1),
+                FirstBreakBy11 = trend,
+                RestOfDay = trend,
+                RestOfDayPoints = bullish ? 15 : -15
+            };
+        }).ToArray();
+        var fitted = OpeningDirectionResearch.ShapeFit.Train(sample[..36], 3);
+        var model = new OpeningDirectionResearch.FrozenProbabilities(
+            sample[..36], fitted, OpeningDirectionResearch.Target.RestOfDay);
+        Ensure(model.BaselineUp > 0 && model.BaselineUp < 1 &&
+               sample.All(x => model.Probability(x, "SHAPE_PRE4") is >= 0 and <= 1),
+            "Training-only probabilities must be properly bounded.");
+        var baseline = sample[50];
+        var changedTarget = baseline with {
+            RestOfDay = OpeningDirectionResearch.Outcome.Up
+        };
+        Ensure(model.Probability(baseline, "SHAPE_PRE4") ==
+               model.Probability(changedTarget, "SHAPE_PRE4"),
+            "A future target change cannot alter an already-frozen prediction.");
+
+        using var output = new StringWriter();
+        OpeningDirectionResearch.Print(sample[..50], sample[50..], 3, output);
+        var report = output.ToString();
+        Ensure(report.Contains("DIRECTION_RESEARCH_SHAPE,") &&
+               report.Contains("DIRECTION_RESEARCH_PREMARKET,") &&
+               report.Contains("DIRECTION_RESEARCH_CORRELATION,") &&
+               report.Contains("DIRECTION_RESEARCH_CONDITIONAL,") &&
+               report.Contains("DIRECTION_RESEARCH_FORECAST,") &&
+               report.Contains("HISTORICAL_TEST_ALREADY_SEEN") &&
+               report.Contains("RECENT_ALREADY_SEEN"),
+            "Shape and premarket results must include actual conditional " +
+            "frequencies, correlations and frozen future-period forecasts.");
+        Console.WriteLine("PASS: standalone 15-minute shape/premarket causality, " +
+            "incomplete data, ambiguity and chronological forecast checks.");
+    }
 
     private static void TestFrozenOrbGroup3Replay()
     {

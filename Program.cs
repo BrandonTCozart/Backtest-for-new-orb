@@ -50,7 +50,16 @@ try
         parallelWorkers < 0 || parallelWorkers > 32)
         throw new ArgumentException(
             "Backtest:ParallelWorkers must be 0 (automatic) or 1 through 32.");
+    var shapeGroupsText = configuration["Backtest:ShapePatternGroups"] ?? "5";
+    if (!int.TryParse(shapeGroupsText, out var shapeGroups) ||
+        shapeGroups is < 2 or > 8)
+        throw new ArgumentException(
+            "Backtest:ShapePatternGroups must be between 2 and 8.");
     var mode = (configuration["Backtest:Mode"] ?? "HistoricalThenRecent").Trim().ToLowerInvariant();
+    if (mode is "openingdirectionresearch" or "shapepremarketresearch")
+        return await OpeningDirectionResearch.RunAsync(
+            configuration.GetConnectionString("MarketData"), symbol,
+            timeZone, shapeGroups);
     if (mode is "orbgroup3replay" or "orbgroup3")
         return await OrbGroup3ReplayRunner.RunAsync(
             configuration.GetConnectionString("MarketData"), symbol, timeZone);
@@ -99,7 +108,7 @@ try
         }
         default:
             throw new ArgumentException(
-                "Backtest:Mode must be HistoricalThenRecent, ResearchThenHistorical, Multi, HistoricalReplay, Orb, OrbPatternResearch, OrbGroup3Replay, or Both (appsettings.json).");
+                "Backtest:Mode must be HistoricalThenRecent, ResearchThenHistorical, Multi, HistoricalReplay, Orb, OrbPatternResearch, OrbGroup3Replay, OpeningDirectionResearch, or Both (appsettings.json).");
     }
 }
 catch (Exception error)

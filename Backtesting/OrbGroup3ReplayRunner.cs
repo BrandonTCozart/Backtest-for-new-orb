@@ -93,7 +93,10 @@ public static class OrbGroup3ReplayRunner
         progress.Advance();
         var sessions = complete.Where(x => original.ContainsKey(x.Day)).ToArray();
         var orb = sessions.Select(x => original[x.Day]).ToArray();
-        progress.Complete();
+        if (startNewStage)
+            progress.Complete();
+        else
+            progress.Advance(); // Three preparation steps; two replays follow.
         Console.WriteLine("ORB_GROUP3_AUDIT,complete_sessions=" + complete.Count +
             ",usable_orb_sessions=" + sessions.Length +
             ",excluded_no_range=" + (complete.Count - sessions.Length));

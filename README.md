@@ -60,6 +60,32 @@ The **RegimeAware** portfolio router competes against the existing single, fixed
 
 Regime thresholds are selected exclusively from training history (small, disclosed 16-threshold grid, optionally with chronological fallbacks), with frozen choices evaluated on later OOS dates. The console reports `FOLD_REGIME_COMPARE` for each fold and `REPLAY_REGIME_COMPARE`, `REPLAY_REGIME_AUDIT`, `REPLAY_TOTAL,RegimeComparison`, plus weekly and yearly regime comparison rows in the later frozen evaluation. This reports a trained regime alternative even when another router wins the training selection. These improvements **change which sessions and contracts enter the backtest**: older performance numbers and previously frozen configuration IDs are **not directly comparable**, and real SQL re-optimization/replay is required. The synthetic suite tests future-volume roll avoidance, decision cutoffs, future-bar immunity, six regime states, and parallel/serial parity. No actual SQL outcomes have been measured by CI.
 
+## Experimental ORB opening-pattern clusters (opt-in)
+
+This experiment is **completely separate** from the active five-family/adaptive optimization. It keeps existing strategies, original ORB logic, grid configuration IDs, reports, and defaults unchanged. To run it, set:
+
+```json
+"Backtest": {
+  "Mode": "OrbPatternResearch",
+  "SearchProfile": "Deep",
+  "OrbPatternGroups": 4
+}
+```
+
+Press Play / run Release to load historical `dbo.MES_DATA_2020_2025` read-only and print a standalone, parseable ORB pattern research report. Set `Backtest:Mode` back to `HistoricalThenRecent` for the existing system. `Smoke` runs the smaller development search. `OrbPatternGroups` accepts 2–8 and defaults to 4, but changing it after seeing test performance is **another research iteration**, not an independent test.
+
+### How the opening groups are learned
+
+Each day is assigned a numeric feature vector using **only the fifteen completed 09:30–09:44 ET one-minute OHLCV candles**, so the feature vector becomes available at **09:45 ET**. Input features include opening-range width versus ATR, net direction and close location, first 09:30 candle body and volume share, volume acceleration, a **bullish-minus-bearish candle-volume proxy** (not actual buyer/seller aggressor volume), price-path efficiency and reversals, wick imbalance, relative volume versus the previous complete **same-contract** RTH session, and five scaled price-path checkpoints within the opening window. Ranges, paths, and volume are normalized so clustering can compare openings at different ES price levels. A missing previous contract reference is an explicit feature.
+
+The program fits **deterministic standardized k-means** on the earliest **60%** of complete historical sessions only, fixing the feature means/standard deviations and four cluster centroids. It does not pre-label a group as bull/bear/choppy; `ORB_PATTERN_GROUP` reports its observed training characteristics. Test dates are classified by the **already-frozen** centroids—no later candle or trade outcome enters classification.
+
+The same earliest 60% TRAIN block is used to select **one ORB configuration per group**, along with a separate best global one-configuration ORB benchmark. It uses the existing ORB stage stops, risk cap, time cutoff, event rules and exact original/reversed trade simulation, preserving all variant IDs. Candidates must have meaningful trade samples in both halves of training, positive P&L after **$20/ES** stress cost, and positive drawdown-penalized training score. Missing evidence means **no trade** for that group. The training-only strategy search evaluates one historical source; it does not inspect the later sessions during configuration selection.
+
+The middle **20%** is the VALIDATION block: frozen configurations are replayed on that block, and each group must prove it has sufficient trades, positive cost-stressed results, **better cost-stressed performance than the global ORB on that group's dates**, and a controlled drawdown to remain enabled. Once that decision is fixed, the final **20%** chronological TEST block runs without refitting **anything**. Reports contain global ORB, all grouped ORB candidates (before validation gating), and validation-gated ORB equity totals and weekly curves. Disabled clusters trade nothing. Compare `ORB_PATTERN_TOTAL,TEST` first, and read `ORB_PATTERN_SELECTED` and `ORB_PATTERN_GROUP_TEST` to understand which groups helped or hurt. `ORB_PATTERN_WEEKLY` enables an HTML dashboard without writing files.
+
+**Research caveat:** These historical dates have already been examined during earlier optimization. Even though the **current experiment** never uses its last 20% for selection, that section is *not a pristine, never-inspected* holdout for the overall project. A still-later genuinely new sample / paper trading is necessary before concluding this group strategy generalizes. The group rule set is a testable hypothesis, not an automated edge.
+
 ## Choose which research to run
 
 Set `Backtest:Mode` in `appsettings.json` or a local override:
@@ -71,6 +97,7 @@ Set `Backtest:Mode` in `appsettings.json` or a local override:
 | `Multi` | Recent-data multi-strategy grid, walk-forward results, and router comparisons only |
 | `HistoricalReplay` **(legacy)** | Previously pinned 19 historical configs from an older recent fold; no fresh optimization |
 | `Orb` | Original separate exhaustive ORB-only optimizer |
+| `OrbPatternResearch` **(experimental)** | First 60% historical train → next 20% validation → last 20% frozen test; cluster 09:30–09:45 openings and specialize ORB settings, without changing existing modes |
 | `Both` | Recent-data multi-strategy optimizer followed by independent ORB optimizer |
 
 The full **Deep** multi-strategy grid contains **587,520 configurations across 19 strategy families** (default Focused runs five), retaining all original IDs and comparing fixed reward/risk targets, historical support/resistance targets, 25 ATR trailing activation/distance pairs with selected break-even choices, ORB-inspired staged profit locks, and target-activated trails. ORB itself retains its native staged exits. The `Smoke` profile (2,040 candidates) is a quick development/regression subset; default `Deep` tests everything. Running Deep on ~1,246 older validated sessions is substantially more computationally expensive than the previous ~250-session recent optimization.

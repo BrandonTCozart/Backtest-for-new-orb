@@ -162,6 +162,7 @@ public static class MultiStrategySelfTests
             TestCausalContractRoll();
             TestMarketRegimeCutoffs(date, folder);
             TestAdaptiveCandlestickCausality(date, folder);
+            TestOrbOpeningPatternFeatures(date, folder);
 
             var start = MarketTime.ToUtc(date, new TimeOnly(11, 0));
             var win = new MultiStrategyTrade(date, MultiStrategyKind.MorningMomentum, 1,
@@ -233,6 +234,31 @@ public static class MultiStrategySelfTests
                 .Take(25).ToArray();
             var syntheticYear = sampleDays.SelectMany(CreateFullSession)
                 .OrderBy(b => b.T).ToList();
+            using (var patternOutput = new StringWriter())
+            {
+                var previous = Console.Out;
+                try
+                {
+                    Console.SetOut(patternOutput);
+                    Ensure(OrbOpeningPatternExperiment.Run(
+                        syntheticYear, syntheticYear, MultiSearchProfile.Smoke,
+                        groupCount: 2) == 0,
+                        "Isolated ORB opening-window experiment must run on synthetic candles.");
+                }
+                finally { Console.SetOut(previous); }
+                var text = patternOutput.ToString();
+                Ensure(text.Contains("ORB_PATTERN_SPLIT,train=15,validation=5,test=5") &&
+                       text.Contains("ORB_PATTERN_GROUP,") &&
+                       text.Contains("ORB_PATTERN_SELECTED,") &&
+                       text.Contains("ORB_PATTERN_TOTAL,TEST,Global_ORB,") &&
+                       text.Contains("ORB_PATTERN_TOTAL,TEST,Grouped_ORB_no_gate,") &&
+                       text.Contains("ORB_PATTERN_TOTAL,TEST,Grouped_ORB_validation_gated,") &&
+                       text.Split('\n').Count(x => x.StartsWith(
+                           "ORB_PATTERN_TOTAL,TEST,", StringComparison.Ordinal)) == 3,
+                    "Pattern research must report disjoint train/validation/test " +
+                    "and both grouped/no-trade OOS comparisons.");
+                Console.WriteLine("PASS: separate ORB opening-pattern train/validate/test research.");
+            }
             // Capture the ordinary console report instead of checking report
             // artifacts: the backtest must not write any files or need them.
             var regularOut = Console.Out;
@@ -571,6 +597,53 @@ public static class MultiStrategySelfTests
         }
     }
 
+
+    private static void TestOrbOpeningPatternFeatures(DateOnly date, string folder)
+    {
+        var raw = CreateFullSession(date);
+        var reference = MultiStrategyData.Build(raw, raw, folder).Single();
+        var original = OrbOpeningPatternExperiment.Extract(reference, null);
+        var future = raw.Select(x => x.T == reference.Rth[300].T
+            ? x with {
+                C = new Candle {
+                    T = x.T, O = x.C.O, H = x.C.H + 100m,
+                    L = x.C.L - 100m, C = x.C.C + 5m, V = x.C.V * 8
+                }
+            } : x).ToList();
+        var replayed = MultiStrategyData.Build(future, future, folder).Single();
+        var after = OrbOpeningPatternExperiment.Extract(replayed, null);
+        Ensure(original.Features.SequenceEqual(after.Features),
+            "ORB opening-window groups cannot observe post-09:45 candles.");
+        var early = raw.Select(x => x.T == reference.Rth[0].T
+            ? x with {
+                C = new Candle {
+                    T = x.T, O = x.C.O, H = x.C.H + 5m,
+                    L = x.C.L, C = x.C.C + 2m, V = x.C.V * 20
+                }
+            } : x).ToList();
+        var newDay = MultiStrategyData.Build(early, early, folder).Single();
+        var altered = OrbOpeningPatternExperiment.Extract(newDay, null);
+        Ensure(!original.Features.SequenceEqual(altered.Features),
+            "ORB features must react to a changed completed 09:30 candle.");
+        var split = OrbOpeningPatternExperiment.MakeSplit(25);
+        Ensure(split.TrainCount == 15 && split.ValidationCount == 5 &&
+               split.TestCount == 5 && split.TrainEnd == 15 &&
+               split.ValidationEnd == 20,
+            "ORB research must maintain a 60/20/20 chronological split.");
+        var source = Enumerable.Range(0, 30).Select(i =>
+            original with {
+                Day = date.AddDays(i),
+                Features = original.Features.Select((v, j) =>
+                    j == 1 ? v + (i % 3) * 0.15 :
+                    j == 3 ? v + (i / 3) * 0.05 : v).ToArray()
+            }).ToArray();
+        var model = OpeningClusterModel.Fit(source.Take(20).ToArray(), 3);
+        var before = source.Take(20).Select(model.Assign).ToArray();
+        _ = source.Skip(20).Select(model.Assign).ToArray();
+        Ensure(before.SequenceEqual(source.Take(20).Select(model.Assign)),
+            "Cluster centroids must remain frozen when evaluating later dates.");
+        Console.WriteLine("PASS: causal 09:30-09:45 ORB features and frozen train-only clusters.");
+    }
 
     private static void TestAdaptiveCandlestickCausality(DateOnly date, string folder)
     {

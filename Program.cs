@@ -40,12 +40,21 @@ try
         !Enum.IsDefined(configurationMode))
         throw new ArgumentException(
             "Backtest:ConfigurationMode must be Baseline, Adaptive or AdaptiveCandles.");
+    var orbPatternGroupsText = configuration["Backtest:OrbPatternGroups"] ?? "4";
+    if (!int.TryParse(orbPatternGroupsText, out var orbPatternGroups) ||
+        orbPatternGroups is < 2 or > 8)
+        throw new ArgumentException(
+            "Backtest:OrbPatternGroups must be an integer between 2 and 8.");
     var workersText = configuration["Backtest:ParallelWorkers"] ?? "0";
     if (!int.TryParse(workersText, out var parallelWorkers) ||
         parallelWorkers < 0 || parallelWorkers > 32)
         throw new ArgumentException(
             "Backtest:ParallelWorkers must be 0 (automatic) or 1 through 32.");
     var mode = (configuration["Backtest:Mode"] ?? "HistoricalThenRecent").Trim().ToLowerInvariant();
+    if (mode is "orbpatternresearch" or "orbpatterns" or "orbclustering")
+        return await OrbOpeningPatternExperiment.RunAsync(
+            configuration.GetConnectionString("MarketData"), symbol, timeZone,
+            searchProfile, orbPatternGroups);
     if (mode is "historicalthenrecent" or "reverse" or "historicaltrainthenrecent")
         return await HistoricalReplayRunner.RunHistoricalThenRecentAsync(
             configuration.GetConnectionString("MarketData"), symbol, timeZone,
@@ -87,7 +96,7 @@ try
         }
         default:
             throw new ArgumentException(
-                "Backtest:Mode must be HistoricalThenRecent, ResearchThenHistorical, Multi, HistoricalReplay, Orb, or Both (appsettings.json).");
+                "Backtest:Mode must be HistoricalThenRecent, ResearchThenHistorical, Multi, HistoricalReplay, Orb, OrbPatternResearch, or Both (appsettings.json).");
     }
 }
 catch (Exception error)

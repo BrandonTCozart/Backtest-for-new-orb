@@ -262,8 +262,8 @@ public static class BreakoutQualityResearch
                     "TRAIN_PREDICTION_75TH_PERCENTILE" : "FIXED_PREDECLARED"));
         }
         foreach (var (period, dates, observations) in new[] {
-            ("TRAIN", split.TrainCount, train),
-            ("VALIDATION", split.ValidationCount, validation),
+            ("TRAIN", split.TrainEnd, train),
+            ("VALIDATION", split.ValidationEnd - split.TrainEnd, validation),
             ("HISTORICAL_TEST_ALREADY_SEEN", split.HistoricalCount - split.ValidationEnd, oldTest),
             ("RECENT_ALREADY_SEEN", recent.Length, recentTest)
         })

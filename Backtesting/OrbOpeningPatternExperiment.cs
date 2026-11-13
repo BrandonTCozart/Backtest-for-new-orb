@@ -56,22 +56,26 @@ public static class OrbOpeningPatternExperiment
         if (groupCount is < 2 or > 8)
             throw new ArgumentOutOfRangeException(nameof(groupCount),
                 "ORB pattern groups must be between 2 and 8.");
-        var sessions = MultiStrategyData.Build(active, all, "unused");
-        if (sessions.Count > 0 && sessions[0].Day.Year <= 2025)
+        var complete = MultiStrategyData.Build(active, all, "unused");
+        if (complete.Count > 0 && complete[0].Day.Year <= 2025)
             HistoricalReplayRunner.ValidateHistoricalReleaseCoverage(
-                sessions[0].Day, sessions[^1].Day);
-        if (sessions.Count < 25)
+                complete[0].Day, complete[^1].Day);
+        var valid = complete.Select(x => x.Day).ToHashSet();
+        var usableOrb = OptimizationData.Prepare(active.ToList(), all.ToList())
+            .Where(x => x.Range is not null && valid.Contains(x.Day))
+            .ToDictionary(x => x.Day);
+        // Index by EXACT date rather than relying on two independent session
+        // builders to return the same count or implicit array alignment.
+        var sessions = complete.Where(x => usableOrb.ContainsKey(x.Day)).ToArray();
+        var orb = sessions.Select(x => usableOrb[x.Day]).ToArray();
+        Console.WriteLine("ORB pattern eligible full-length RTH days: " +
+            sessions.Length + "; missing usable ORB ranges: " +
+            (complete.Count - sessions.Length));
+        if (sessions.Length < 25)
         {
-            Console.Error.WriteLine("ORB group research needs at least 25 complete RTH sessions.");
+            Console.Error.WriteLine("ORB group research needs at least 25 valid ORB opening windows.");
             return 2;
         }
-        var usable = sessions.Select(x => x.Day).ToHashSet();
-        var orb = OptimizationData.Prepare(active.ToList(), all.ToList())
-            .Where(x => x.Range is not null && usable.Contains(x.Day))
-            .OrderBy(x => x.Day).ToArray();
-        if (orb.Length != sessions.Count)
-            throw new InvalidOperationException(
-                "ORB and multi-strategy validated RTH calendars must match exactly.");
         var run = Research(sessions, orb, profile, groupCount);
         Report(run, sessions);
         Console.WriteLine("ORB opening-window research complete; no files written and no SQL modified.");

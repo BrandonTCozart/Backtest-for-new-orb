@@ -163,6 +163,7 @@ public static class MultiStrategySelfTests
             TestMarketRegimeCutoffs(date, folder);
             TestAdaptiveCandlestickCausality(date, folder);
             TestOrbOpeningPatternFeatures(date, folder);
+            TestOrbResearchProgress();
 
             var start = MarketTime.ToUtc(date, new TimeOnly(11, 0));
             var win = new MultiStrategyTrade(date, MultiStrategyKind.MorningMomentum, 1,
@@ -254,7 +255,11 @@ public static class MultiStrategySelfTests
                        text.Contains("ORB_PATTERN_TOTAL,TEST,Grouped_ORB_no_gate,") &&
                        text.Contains("ORB_PATTERN_TOTAL,TEST,Grouped_ORB_validation_gated,") &&
                        text.Split('\n').Count(x => x.StartsWith(
-                           "ORB_PATTERN_TOTAL,TEST,", StringComparison.Ordinal)) == 3,
+                           "ORB_PATTERN_TOTAL,TEST,", StringComparison.Ordinal)) == 3 &&
+                       Enumerable.Range(1, 7).All(stage =>
+                           text.Contains("ORB PROGRESS [" + stage + "/7]")) &&
+                       text.Contains("Optimize ORB configurations (training only)") &&
+                       text.Contains("100%"),
                     "Pattern research must report disjoint train/validation/test " +
                     "and both grouped/no-trade OOS comparisons.");
                 Console.WriteLine("PASS: separate ORB opening-pattern train/validate/test research.");
@@ -597,6 +602,26 @@ public static class MultiStrategySelfTests
         }
     }
 
+
+    private static void TestOrbResearchProgress()
+    {
+        using var writer = new StringWriter();
+        var tracker = new OrbResearchProgress(writer);
+        tracker.Start(4, "Test configuration progress", 40);
+        tracker.Update(1);
+        tracker.Update(19);
+        tracker.Update(39);
+        tracker.Complete();
+        var lines = writer.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Ensure(lines[0].Contains("000% (0/40)") &&
+               lines.Any(x => x.Contains("Test configuration progress") &&
+                   x.Contains("047% (19/40)")) &&
+               lines[^1].Contains("100% (40/40)") &&
+               lines.All(x => x.StartsWith("ORB PROGRESS [4/7]")) &&
+               lines.Length <= 22,
+            "Progress bar must be bounded, informative and complete at 100%.");
+        Console.WriteLine("PASS: stage progress bars include percentage and actual config counts.");
+    }
 
     private static void TestOrbOpeningPatternFeatures(DateOnly date, string folder)
     {

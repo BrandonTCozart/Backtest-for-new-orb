@@ -72,7 +72,10 @@ This experiment is **completely separate** from the active five-family/adaptive 
 }
 ```
 
-Press Play / run Release to load historical `dbo.MES_DATA_2020_2025` read-only and print a standalone, parseable ORB pattern research report. Set `Backtest:Mode` back to `HistoricalThenRecent` for the existing system. `Smoke` runs the smaller development search. `OrbPatternGroups` accepts 2–8 and defaults to 4, but changing it after seeing test performance is **another research iteration**, not an independent test.
+Press Play / run Release to load historical `dbo.MES_DATA_2020_2025` read-only and print a standalone, parseable ORB pattern research report.
+
+**Live progress:** The console shows seven numbered stages with ASCII progress bars and percentages: (1) SQL loading, (2) session preparation, (3) opening-pattern clustering, (4) ORB configuration search, (5) validation, (6) final holdout test, and (7) reporting. Optimization displays actual directional evaluations completed / total with a progress update every 5%. SQL loading is marked **indeterminate until complete** because the loader does not expose a reliable row-level completion count. The progress output is display-only; it does not change orders, selection criteria, dates, costs or model fitting. The lines remain readable when copied from Visual Studio.
+ Set `Backtest:Mode` back to `HistoricalThenRecent` for the existing system. `Smoke` runs the smaller development search. `OrbPatternGroups` accepts 2–8 and defaults to 4, but changing it after seeing test performance is **another research iteration**, not an independent test.
 
 ### How the opening groups are learned
 

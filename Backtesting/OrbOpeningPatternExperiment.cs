@@ -44,19 +44,36 @@ public static class OrbOpeningPatternExperiment
         Console.WriteLine("=== OPENING-WINDOW ORB GROUP RESEARCH (NO LIVE ORDERS) ===");
         Console.WriteLine("This separate mode does not change the active multi-strategy bot.");
         Console.WriteLine("Reading historical ES futures from dbo.MES_DATA_2020_2025.");
+        var progress = new OrbResearchProgress();
+        // SQL loading has no row-count callback; its duration is unknown.
+        progress.Start(1, "Loading SQL history (indeterminate)", 1);
         var market = await SqlMarketDataLoader.LoadAsync(connectionString,
             symbol, timeZone, tableName: "MES_DATA_2020_2025");
-        return Run(market.ActiveBars, market.AllContractBars, profile, groupCount);
+        progress.Complete();
+        return RunCore(market.ActiveBars, market.AllContractBars,
+            profile, groupCount, progress);
     }
 
     public static int Run(IReadOnlyList<PriceBar> active,
         IReadOnlyList<PriceBar> all, MultiSearchProfile profile,
         int groupCount = 4)
     {
+        var progress = new OrbResearchProgress();
+        progress.Start(1, "Using supplied ES candles", 1);
+        progress.Complete();
+        return RunCore(active, all, profile, groupCount, progress);
+    }
+
+    private static int RunCore(IReadOnlyList<PriceBar> active,
+        IReadOnlyList<PriceBar> all, MultiSearchProfile profile,
+        int groupCount, OrbResearchProgress progress)
+    {
         if (groupCount is < 2 or > 8)
             throw new ArgumentOutOfRangeException(nameof(groupCount),
                 "ORB pattern groups must be between 2 and 8.");
+        progress.Start(2, "Prepare complete trading sessions", 3);
         var complete = MultiStrategyData.Build(active, all, "unused");
+        progress.Advance();
         if (complete.Count > 0 && complete[0].Day.Year <= 2025)
             HistoricalReplayRunner.ValidateHistoricalReleaseCoverage(
                 complete[0].Day, complete[^1].Day);
@@ -64,10 +81,12 @@ public static class OrbOpeningPatternExperiment
         var usableOrb = OptimizationData.Prepare(active.ToList(), all.ToList())
             .Where(x => x.Range is not null && valid.Contains(x.Day))
             .ToDictionary(x => x.Day);
+        progress.Advance();
         // Index by EXACT date rather than relying on two independent session
         // builders to return the same count or implicit array alignment.
         var sessions = complete.Where(x => usableOrb.ContainsKey(x.Day)).ToArray();
         var orb = sessions.Select(x => usableOrb[x.Day]).ToArray();
+        progress.Complete();
         Console.WriteLine("ORB pattern eligible full-length RTH days: " +
             sessions.Length + "; missing usable ORB ranges: " +
             (complete.Count - sessions.Length));
@@ -76,8 +95,10 @@ public static class OrbOpeningPatternExperiment
             Console.Error.WriteLine("ORB group research needs at least 25 valid ORB opening windows.");
             return 2;
         }
-        var run = Research(sessions, orb, profile, groupCount);
+        var run = Research(sessions, orb, profile, groupCount, progress);
+        progress.Start(7, "Produce summary and weekly results", 1);
         Report(run, sessions);
+        progress.Complete();
         Console.WriteLine("ORB opening-window research complete; no files written and no SQL modified.");
         return 0;
     }
@@ -181,13 +202,19 @@ public static class OrbOpeningPatternExperiment
     internal static ExperimentResult Research(
         IReadOnlyList<MultiSession> sessions,
         IReadOnlyList<SessionData> orb,
-        MultiSearchProfile profile, int groupCount)
+        MultiSearchProfile profile, int groupCount,
+        OrbResearchProgress? progress = null)
     {
+        progress ??= new OrbResearchProgress();
         var split = MakeSplit(sessions.Count);
+        progress.Start(3, "Discover opening-window groups", 3);
         var profiles = ExtractProfiles(sessions);
+        progress.Advance();
         var model = OpeningClusterModel.Fit(
             profiles.Take(split.TrainEnd).ToArray(), groupCount);
+        progress.Advance();
         var labels = profiles.Select(model.Assign).ToArray();
+        progress.Complete();
         var trainDays = sessions.Take(split.TrainEnd).ToArray();
         var trainOrb = orb.Take(split.TrainEnd).ToArray();
         var candidates = MultiStrategyEngine.EnumerateVariants(profile)
@@ -213,6 +240,8 @@ public static class OrbOpeningPatternExperiment
             ",groups=" + groupCount + ",base_configs=" + candidates.Length +
             ",direction_evaluations=" + (candidates.Length * 2));
         Console.WriteLine("Volume by candle direction is a proxy, not actual aggressor volume.");
+        progress.Start(4, "Optimize ORB configurations (training only)",
+            candidates.Length * 2);
 
         // CRUCIAL: no later candles are ever simulated while choosing experts.
         // All evaluation dates here belong to TRAIN only.
@@ -246,21 +275,22 @@ public static class OrbOpeningPatternExperiment
                         specialist[group] = new Selected(v, score, rank);
                 }
                 evaluations++;
+                progress.Update(evaluations);
             }
             // The original ORB entry/trade caches otherwise grow for tens of
             // thousands of 1-minute ES candidate simulations.
             if (evaluations % 96 == 0)
                 OptimizationEngine.ClearCaches();
-            if (evaluations % 2000 == 0)
-                Console.WriteLine("ORB_PATTERN_PROGRESS," + evaluations +
-                    "/" + (candidates.Length * 2));
+            // Progress bar prints every 5% (rather than every raw evaluation).
         }
 
         // Freeze all selected IDs before examining validation P&L.
         OptimizationEngine.ClearCaches();
+        progress.Start(5, "Replay validation and select tradeable groups",
+            PeriodProgressSteps(global, specialist, groupCount) + groupCount);
         var validation = SimulatePeriod(sessions, orb,
             split.TrainEnd, split.ValidationEnd,
-            global, specialist, labels, groupCount);
+            global, specialist, labels, groupCount, progress);
         var enabled = new Dictionary<int, bool>();
         for (var group = 0; group < groupCount; group++)
         {
@@ -276,14 +306,17 @@ public static class OrbOpeningPatternExperiment
                 score.Net - 10m * score.Trades >
                     baselineForGroup.Net - 10m * baselineForGroup.Trades &&
                 score.Drawdown < Math.Max(2000m, score.Net * 2m);
+            progress.Advance();
         }
 
         // After validation-based enable/disable choices are fixed, use the
         // final chronological TEST block exactly once.
         OptimizationEngine.ClearCaches();
+        progress.Start(6, "Replay final untouched-by-fit test block",
+            PeriodProgressSteps(global, specialist, groupCount));
         var test = SimulatePeriod(sessions, orb,
             split.ValidationEnd, split.Count,
-            global, specialist, labels, groupCount);
+            global, specialist, labels, groupCount, progress);
         var accepted = test.ByGroup
             .Where(x => enabled.GetValueOrDefault(x.Key))
             .SelectMany(x => x.Value).OrderBy(t => t.EntryAt).ToArray();
@@ -314,10 +347,18 @@ public static class OrbOpeningPatternExperiment
         IReadOnlyList<MultiStrategyTrade> AllSpecialists,
         IReadOnlyDictionary<int, IReadOnlyList<MultiStrategyTrade>> ByGroup);
 
+    private static int PeriodProgressSteps(Selected? global,
+        IReadOnlyDictionary<int, Selected> specialists, int groupCount) =>
+        specialists.Values.Select(x => x.Variant)
+            .Concat(global is null ? [] : [global.Variant])
+            .DistinctBy(v => (v.Id, v.SignalMode))
+            .Count() + groupCount;
+
     private static PeriodTrades SimulatePeriod(
         IReadOnlyList<MultiSession> sessions, IReadOnlyList<SessionData> orb,
         int start, int end, Selected? global,
-        IReadOnlyDictionary<int, Selected> specialists, int[] labels, int count)
+        IReadOnlyDictionary<int, Selected> specialists, int[] labels, int count,
+        OrbResearchProgress? progress = null)
     {
         var days = sessions.Skip(start).Take(end - start).ToArray();
         var orbDays = orb.Skip(start).Take(end - start).ToArray();
@@ -327,8 +368,11 @@ public static class OrbOpeningPatternExperiment
         var generated = new Dictionary<(int, SignalMode),
             IReadOnlyDictionary<DateOnly, MultiStrategyTrade>>();
         foreach (var variant in unique)
+        {
             generated[(variant.Id, variant.SignalMode)] =
                 MultiStrategyEngine.Generate(variant, days, orbDays);
+            progress?.Advance();
+        }
         IReadOnlyList<MultiStrategyTrade> GlobalTrades() =>
             global is null ? [] :
             generated[(global.Variant.Id, global.Variant.SignalMode)].Values
@@ -339,6 +383,7 @@ public static class OrbOpeningPatternExperiment
             if (!specialists.TryGetValue(g, out var chosen))
             {
                 groupTrades[g] = [];
+                progress?.Advance();
                 continue;
             }
             var possible = generated[(chosen.Variant.Id, chosen.Variant.SignalMode)];
@@ -347,6 +392,7 @@ public static class OrbOpeningPatternExperiment
                 if (labels[i] == g && possible.TryGetValue(sessions[i].Day, out var trade))
                     selected.Add(trade);
             groupTrades[g] = selected;
+            progress?.Advance();
         }
         return new PeriodTrades(GlobalTrades(),
             groupTrades.Values.SelectMany(x => x)

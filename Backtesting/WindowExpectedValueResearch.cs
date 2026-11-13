@@ -486,7 +486,7 @@ public static class WindowExpectedValueResearch
                 var trades = source.Sample;
                 metrics[period] = trades;
                 writer.WriteLine("WINDOW_EV_COHORT," + scenario.Name + "," +
-                    period + "," + data.Sessions.Length + "," + trades.Length +
+                    period + "," + data.Length + "," + trades.Length +
                     "," + source.Early + "," + source.None + "," + source.Ambiguous +
                     "," + Average(trades.Select(x => x.Width)) +
                     "," + trades.Count(x => x.TargetFirst) +

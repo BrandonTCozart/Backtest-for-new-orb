@@ -1,6 +1,6 @@
 # ES Multi-Strategy Backtester + Original ORB Optimizer
 
-Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The **current default is `OpeningDirectionResearch`**, a fast, single-threaded, exploratory study of the first 15-minute price path and premarket direction. It does **not** optimize ORB strategies or simulate trades. The earlier portfolio / ORB experiment modes remain available by changing `Backtest:Mode`. Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
+Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The **current default is `OpeningDirectionResearch`**, a fast, single-threaded, exploratory study of the first 15-minute price path and premarket direction. It does **not** optimize ORB strategies. It now includes one fixed, explicitly hypothetical breakout-fill diagnostic (not a live execution model), alongside its statistics. The earlier portfolio / ORB experiment modes remain available by changing `Backtest:Mode`. Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
 
 
 ### Adaptive configurations and candle features (November 2026)
@@ -85,13 +85,39 @@ The direction model estimates a **conditional** P(up) against P(down) for clear 
 - `DIRECTION_RESEARCH_FORECAST` — frozen baseline vs premarket-only vs shape-only vs combined Brier/accuracy/coverage.
 - `DIRECTION_RESEARCH_SQL_SECONDS`, `DIRECTION_RESEARCH_REPORT_SECONDS`, `DIRECTION_RESEARCH_TOTAL_SECONDS` — simple runtime counters for performance comparisons.
 
+### Follow-up test: Is "shape" more than distance to the range boundary?
+
+The original ~68% shape-model directional accuracy was *not* enough to claim that the 15-minute **path** carries unique information. The next step evaluates five predeclared predictors on **exactly the same valid first-breakout days**, using the **same unchanged chronological splits**:
+
+- `BASE`: Constant training-frequency baseline.
+- `NEAREST_RULE`: **Deterministic, no fitting** — at 09:45 compare the close's distance to the already-completed range high and low; predict the nearer boundary; abstain on an exact tie. It does not use all 15 prices.
+- `NEAREST_CAL`: The same nearest-boundary sign, but its *probability of up* is calibrated using **training only** with a 20-observation shrinkage prior. This makes its Brier score more directly comparable to probability models.
+- `COMPACT`: Simple, **training-only regularized logistic regression** using 09:45 position within the range, opening net move divided by range width, and log opening width. Its fixed 400-iteration learning schedule and L2 penalty are **not optimized on the holdout**.
+- `SHAPE`: The previously used K-means 15-point line-shape classifier and training-only probabilities. None of these models uses premarket or price after 09:44 for its prediction.
+
+The new console `BREAKOUT_VALIDATION_PREDICT` rows report accuracy, coverage, conditional Brier scores, and high-confidence coverage for each period. `BREAKOUT_VALIDATION_PAIRED` directly compares each model's right/wrong predictions against SHAPE on the *same dates*, so differences are not caused by sample selection. Deterministic `NEAREST_RULE` does not claim a calibrated probability (its Brier is `na`). Flat, unbroken, and same-minute two-boundary cases are counted separately by `BREAKOUT_VALIDATION_NO_BREAK`. The five groups remain an **arbitrary initial fixed K**.
+
+### Follow-up test: Breakout follow-through and an execution-relevant diagnostic
+
+The new mode also measures an **illustrative, fixed, unoptimized one-ES trade** *after* the actual first post-09:45 opening-range breach (first eligible minute from **09:45 through 10:59 ET**).
+
+1. If a candle crosses both range boundaries, the order of touches is unknowable from one-minute OHLC; **discard it**. If no boundary breaks before 11:00, **no trade**. Only the first unambiguous breakout is eligible.
+2. Observe the entire breakout minute **before** taking action; fill at the **following minute's open**, in the direction of the confirmed breakout. Never assume a fill at the range boundary or within the signal candle.
+3. Use an unchanged **10 ES-point stop**, **15-point profit target**, **one ES contract**, **$10 estimated round-trip costs** (plus $20/$30 cost-stress reports) and **hard exit on the 12:00 ET candle close** if neither barrier fires earlier. Stop and target touched within the same minute → **stop-first**; stop gaps fill at the worse open; favorable gap-target fills receive no better than the target price.
+4. Compare the reactive, predeclared `ALL_BREAKS` control (enter after *any* first confirmed break) against prediction-filtered `NEAREST_RULE`, `COMPACT`, `SHAPE`, and `SHAPE_CONF60` (only signal when frozen shape probability is at least 60% for a side). The prediction filter is fixed from **09:45 information**; breakout confirmation is observed **later**, and actual trade entries occur **after** that confirmation. Different trade counts mean these P&L totals are *not* matched-pair causal comparisons.
+5. Also report **30 minutes of subsequent high/low favorable/adverse excursion** from each hypothetical entry price. These excursions are *descriptive* and may include bars **after a stop exit**; do not interpret them as realizable sequential fills.
+
+Console: `BREAKOUT_VALIDATION_TRADES` includes entry-count, win rate, net P&L, closed-trade drawdown, profit factor, fixed cost stress, 30-minute MFE/MAE, and exit reasons. **Results are simulations, not the execution statistics of a proven strategy**. This one fixed stop/target pair is a diagnostic, not an exit optimizer and not a proposal to deploy.
+
+**Control for research bias:** The 2024–2025 and 2025–2026 periods have been *seen repeatedly* in prior project research. They are technically later than the training fit, but are **not independent pristine confirmation** of the newly chosen hypothesis. Do not tune model features, model count, stop/target, risk or thresholds on these results and then call them unseen. New forward/paper-trading evidence is required.
+
 **Performance improvements, without multicore parallelism:** This mode processes a complete RTH session only once, uses binary search on already sorted active-contract bars to locate each UTC-aligned window, computes just the opening line, premarket changes and labels (no multi-strategy indicators, 930-minute per-session regime indicators, ORB parameter searches or trade-simulation caches), and trains small shape centroids from only 15 values. No `ParallelWorkers` are used. The SQL loader still retains read-only cross-contract bars to select contracts causally; data-loading time is measured separately.
 
 **Interpretation limits:** Direction correlations can be unstable or noncausal; simultaneous correlated inputs should not simply be added together as if independent. Positive movement prediction is not sufficient for profitable trade execution after costs. One-minute candle OHLC is not tick-by-tick order flow and cannot order opposite boundary touches inside the same minute. No news/sector/week-trend integration yet—those are intentionally deferred until the price and premarket hypotheses have been evaluated.
 
 ## Replay the previously observed 80.95% ORB Group 3 setup (previous experiment)
 
-Set `Backtest:Mode` to **`OrbGroup3Replay`** (current default), then run in Release with your existing SQL credentials. This is a standalone **research-only backtest**, not a trading switch.
+Set `Backtest:Mode` to **`OrbGroup3Replay`** (previous experiment), then run in Release with your existing SQL credentials. This is a standalone **research-only backtest**, not a trading switch.
 
 It runs **only the earlier Group 3 candidate**, identified after seeing 17 wins / 21 trades (80.95%) on the original 2024–2025 historical test:
 

@@ -26,7 +26,9 @@ public static class OpeningDirectionResearch
         bool HasGap, Outcome Opening15, Outcome FirstBreakBy11,
         Outcome RestOfDay, Outcome FullRth,
         double Opening15Points, double RestOfDayPoints,
-        double FullRthPoints);
+        double FullRthPoints,
+        decimal OpeningHigh, decimal OpeningLow, decimal OpeningClose,
+        int FirstBreakBarIndex, PriceBar[] Rth);
 
     internal sealed record Partition(int TrainEnd, int ValidationEnd, int HistoricalCount);
     internal sealed record Forecast(
@@ -314,14 +316,15 @@ public static class OpeningDirectionResearch
             // First confirmed crossing AFTER the range exists (09:45..10:59).
             // Same-minute break of BOTH boundaries is unresolvable with OHLC.
             var breakout = Outcome.None;
+            var firstBreakIndex = -1;
             for (var i = OpeningMinutes; i < 90; i++)
             {
                 var c = bars[firstIndex + i].C;
                 var up = c.H > high;
                 var down = c.L < low;
-                if (up && down) { breakout = Outcome.Ambiguous; break; }
-                if (up) { breakout = Outcome.Up; break; }
-                if (down) { breakout = Outcome.Down; break; }
+                if (up && down) { breakout = Outcome.Ambiguous; firstBreakIndex = i; break; }
+                if (up) { breakout = Outcome.Up; firstBreakIndex = i; break; }
+                if (down) { breakout = Outcome.Down; firstBreakIndex = i; break; }
             }
 
             var night = Premarket(bars, day.AddDays(-1),
@@ -344,7 +347,11 @@ public static class OpeningDirectionResearch
                 Direction(dayClose - firstOpen),
                 (double)(lastOpenClose - firstOpen),
                 (double)(dayClose - lastOpenClose),
-                (double)(dayClose - firstOpen)));
+                (double)(dayClose - firstOpen),
+                high, low, lastOpenClose, firstBreakIndex,
+                // Only 390 references per session; no heavy indicators,
+                // caching or per-strategy lookbacks needed for execution audit.
+                bars.Skip(firstIndex).Take(RthMinutes).ToArray()));
             previousDay = day;
             previousContract = contract;
             previousClose = dayClose;
@@ -606,6 +613,7 @@ public static class OpeningDirectionResearch
                 "Recent SQL must start strictly after historical SQL " +
                 "to prevent double-counted observations.");
         Print(historicalRows, recentRows, shapeGroups);
+        OpeningBreakoutValidation.Report(historicalRows, recentRows, shapeGroups);
         Console.WriteLine("DIRECTION_RESEARCH_TOTAL_SECONDS," +
             F(total.Elapsed.TotalSeconds));
         Console.WriteLine("Directional research finished: no trades, no SQL writes.");

@@ -165,6 +165,7 @@ public static class MultiStrategySelfTests
             TestOrbOpeningPatternFeatures(date, folder);
             TestOrbResearchProgress();
             TestOpeningDirectionResearch(date);
+            TestOpeningBreakoutValidation(date);
             Ensure(OrbGroup3ReplayRunner.FrozenVariant ==
                 (deepVariants.Single(x => x.Id == 14051) with {
                     SignalMode = SignalMode.Reversed
@@ -726,6 +727,115 @@ public static class MultiStrategySelfTests
             "frequencies, correlations and frozen future-period forecasts.");
         Console.WriteLine("PASS: standalone 15-minute shape/premarket causality, " +
             "incomplete data, ambiguity and chronological forecast checks.");
+    }
+
+    private static void TestOpeningBreakoutValidation(DateOnly date)
+    {
+        var source = CreateFullSession(date).OrderBy(x => x.T).ToArray();
+        var original = OpeningDirectionResearch.Extract(source).Single();
+        var high = original.OpeningHigh;
+        var low = original.OpeningLow;
+        var entries = (PriceBar[])original.Rth.Clone();
+        var trigger = entries[15];
+        entries[15] = trigger with {
+            C = new Candle {
+                T = trigger.C.T, O = high - 1m, H = high + 2m,
+                L = high - 2m, C = high + 1m, V = trigger.C.V
+            }
+        };
+        var entry = entries[16];
+        entries[16] = entry with {
+            C = new Candle {
+                T = entry.C.T, O = high + 1m,
+                H = high + 18m, L = high - 11m,
+                C = high + 1m, V = entry.C.V
+            }
+        };
+        var setup = original with {
+            FirstBreakBy11 = OpeningDirectionResearch.Outcome.Up,
+            FirstBreakBarIndex = 15,
+            OpeningClose = high - 1m,
+            Rth = entries
+        };
+        var adverse = OpeningBreakoutValidation.Simulate(setup);
+        Ensure(adverse is not null && adverse.Reason == "stop_first_ambiguous" &&
+               adverse.EntryIndex == 16 &&
+               adverse.Entry == high + 1m &&
+               adverse.Exit == high - 9m &&
+               adverse.Net == -510m &&
+               adverse.ExitAt == entries[16].T,
+            "First breakout candle cannot be traded; next-open entry " +
+            "uses conservative stop-first OHLC handling.");
+
+        var favorable = (PriceBar[])entries.Clone();
+        var f = favorable[16];
+        favorable[16] = f with {
+            C = new Candle {
+                T = f.C.T, O = high + 1m, H = high + 18m,
+                L = high - 1m, C = high + 16m, V = f.C.V
+            }
+        };
+        var target = OpeningBreakoutValidation.Simulate(setup with {
+            Rth = favorable
+        });
+        Ensure(target is not null && target.Reason == "target" &&
+               target.Net == 740m &&
+               target.EntryAt == favorable[16].T,
+            "Fixed 10-point stop and 15-point target must earn $740 " +
+            "after $10 ES costs only when stop is not touched.");
+
+        Ensure(OpeningBreakoutValidation.Simulate(setup with {
+            FirstBreakBy11 = OpeningDirectionResearch.Outcome.Ambiguous
+        }) is null,
+            "Same-minute two-sided breakout is unresolvable; no trade.");
+        Ensure(OpeningBreakoutValidation.Nearest(setup with {
+            OpeningClose = high - 0.25m
+        }) == 1 &&
+               OpeningBreakoutValidation.Nearest(setup with {
+                   OpeningClose = low + 0.25m
+               }) == -1,
+            "The simple baseline must pick the physically nearer boundary.");
+
+        var sample = Enumerable.Range(0, 60).Select(i =>
+        {
+            var bullish = i % 2 == 0;
+            return setup with {
+                Day = date.AddDays(i),
+                Shape = Enumerable.Range(0, 15)
+                    .Select(j => (bullish ? 1 : -1) * j / 15.0 +
+                        Math.Sin(i + j) / 100.0).ToArray(),
+                OpeningHigh = high,
+                OpeningLow = low,
+                OpeningClose = bullish ? high - 1m : low + 1m,
+                Opening15Points = bullish ? 5.0 : -5.0,
+                RangePoints = (double)(high - low),
+                FirstBreakBy11 = bullish ?
+                    OpeningDirectionResearch.Outcome.Up :
+                    OpeningDirectionResearch.Outcome.Down
+            };
+        }).ToArray();
+        var model = OpeningBreakoutValidation.Frozen.Fit(sample[..36], 3);
+        var heldOut = sample[53];
+        var changedFuture = heldOut with {
+            RestOfDayPoints = heldOut.RestOfDayPoints + 400,
+            FirstBreakBy11 = OpeningDirectionResearch.Outcome.Up
+        };
+        foreach (var key in new[] { "BASE", "NEAREST_CAL", "COMPACT", "SHAPE" })
+            Ensure(model.Probability(heldOut, key) ==
+                   model.Probability(changedFuture, key),
+                "No prediction may depend on its held-out target or RTH future.");
+        using var output = new StringWriter();
+        OpeningBreakoutValidation.Report(sample[..50], sample[50..], 3, output);
+        var text = output.ToString();
+        Ensure(text.Contains("BREAKOUT_VALIDATION_PREDICT,VALIDATION") &&
+               text.Contains("BREAKOUT_VALIDATION_PAIRED,") &&
+               text.Contains("BREAKOUT_VALIDATION_TRADES,RECENT_ALREADY_SEEN") &&
+               text.Contains("BREAKOUT_VALIDATION_NO_BREAK,") &&
+               text.Contains("BREAKOUT_VALIDATION_COMPLETE"),
+            "Report must compare hard baseline, compact and full path, " +
+            "then show conservative trade outcomes on later periods.");
+        Console.WriteLine("PASS: frozen nearest/compact/shape baselines and next-open " +
+            "breakout execution (including gap and same-minute stop-first) checks.");
     }
 
     private static void TestFrozenOrbGroup3Replay()

@@ -51,6 +51,9 @@ try
         throw new ArgumentException(
             "Backtest:ParallelWorkers must be 0 (automatic) or 1 through 32.");
     var mode = (configuration["Backtest:Mode"] ?? "HistoricalThenRecent").Trim().ToLowerInvariant();
+    if (mode is "orbgroup3replay" or "orbgroup3")
+        return await OrbGroup3ReplayRunner.RunAsync(
+            configuration.GetConnectionString("MarketData"), symbol, timeZone);
     if (mode is "orbpatternresearch" or "orbpatterns" or "orbclustering")
         return await OrbOpeningPatternExperiment.RunAsync(
             configuration.GetConnectionString("MarketData"), symbol, timeZone,
@@ -96,7 +99,7 @@ try
         }
         default:
             throw new ArgumentException(
-                "Backtest:Mode must be HistoricalThenRecent, ResearchThenHistorical, Multi, HistoricalReplay, Orb, OrbPatternResearch, or Both (appsettings.json).");
+                "Backtest:Mode must be HistoricalThenRecent, ResearchThenHistorical, Multi, HistoricalReplay, Orb, OrbPatternResearch, OrbGroup3Replay, or Both (appsettings.json).");
     }
 }
 catch (Exception error)

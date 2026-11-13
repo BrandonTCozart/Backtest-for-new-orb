@@ -60,6 +60,23 @@ The **RegimeAware** portfolio router competes against the existing single, fixed
 
 Regime thresholds are selected exclusively from training history (small, disclosed 16-threshold grid, optionally with chronological fallbacks), with frozen choices evaluated on later OOS dates. The console reports `FOLD_REGIME_COMPARE` for each fold and `REPLAY_REGIME_COMPARE`, `REPLAY_REGIME_AUDIT`, `REPLAY_TOTAL,RegimeComparison`, plus weekly and yearly regime comparison rows in the later frozen evaluation. This reports a trained regime alternative even when another router wins the training selection. These improvements **change which sessions and contracts enter the backtest**: older performance numbers and previously frozen configuration IDs are **not directly comparable**, and real SQL re-optimization/replay is required. The synthetic suite tests future-volume roll avoidance, decision cutoffs, future-bar immunity, six regime states, and parallel/serial parity. No actual SQL outcomes have been measured by CI.
 
+## Replay the previously observed 80.95% ORB Group 3 setup (current default)
+
+Set `Backtest:Mode` to **`OrbGroup3Replay`** (current default), then run in Release with your existing SQL credentials. This is a standalone **research-only backtest**, not a trading switch.
+
+It runs **only the earlier Group 3 candidate**, identified after seeing 17 wins / 21 trades (80.95%) on the original 2024–2025 historical test:
+
+- Original deterministic four-group opening-window clusters fitted **only on the original 735 training sessions** (2020-09-09 through 2023-09-05). No price or volume after 09:44 ET enters opening-window classification.
+- Exact prior Group 3 winner: **ORB variant #14051, Reversed**, original breakout/retest signal required, opening width 10–40 ES points, Tue/Wed/Thu, 11:00 ET cutoff, avoid intraday release window, stop-risk cap $600/$500 fallback, $150 stage-5 trail, one ES, $10 estimated round-trip costs. Reversed means trade **opposite** the original breakout after its retest signal, at next bar's open.
+- Trades **only** days assigned to Group 3. Every other group remains no-trade. The *previous* validation gate is intentionally ignored, so all Group 3 results are visible, including historically losing periods.
+- Replays all valid sessions in `dbo.MES_DATA_2020_2025`, reporting old training, validation and previously-examined test **separately**; then loads the disjoint newer source `dbo.MES_DATA` (2025–2026 in the current SQL records), classifies the opening windows using **unchanged original training centroids**, and tests the same variant. The second table must start after the first table ends or the run fails to avoid double counting.
+- Console CSV-style reports: `ORB_GROUP3_PERIOD`, `ORB_GROUP3_REPRODUCTION` (checks original 21 wins/losses sample: 21 total, 17 wins, +$2,965), `ORB_GROUP3_YEAR`, `ORB_GROUP3_TRADE` (every simulated trade), and `ORB_GROUP3_COMBINED`, plus sensitivity to $20/$30 round-trip cost. Seven stage progress updates remain.
+- The first historical 735 days **must** match the original dates and day count; otherwise the mode errors rather than silently calling an altered cluster "Group 3". This reproduces a model fitted on the original training dates, not a continuously reoptimized cluster.
+
+**Selection bias:** The 80.95% result was what prompted selecting Group 3. The previous 2024–2025 test block is therefore **already-inspected data**, not a fresh independent validation of this selected strategy. The newer dataset has also been examined previously for other experiments in this project. Do not infer live profitability from these returns.
+
+Switch back to `OrbPatternResearch` to run the four-group learning experiment, or to `HistoricalThenRecent` to restore the older five-family pipeline. No previous research code or strategies are removed.
+
 ## Experimental ORB opening-pattern clusters (opt-in)
 
 This experiment is **completely separate** from the active five-family/adaptive optimization. It keeps existing strategies, original ORB logic, grid configuration IDs, reports, and defaults unchanged. To run it, set:

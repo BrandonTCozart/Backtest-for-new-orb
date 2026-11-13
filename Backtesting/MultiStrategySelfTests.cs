@@ -164,6 +164,11 @@ public static class MultiStrategySelfTests
             TestAdaptiveCandlestickCausality(date, folder);
             TestOrbOpeningPatternFeatures(date, folder);
             TestOrbResearchProgress();
+            Ensure(OrbGroup3ReplayRunner.FrozenVariant ==
+                (deepVariants.Single(x => x.Id == 14051) with {
+                    SignalMode = SignalMode.Reversed
+                }), "Frozen Group 3 winner must retain the EXACT original grid configuration.");
+            TestFrozenOrbGroup3Replay();
 
             var start = MarketTime.ToUtc(date, new TimeOnly(11, 0));
             var win = new MultiStrategyTrade(date, MultiStrategyKind.MorningMomentum, 1,
@@ -602,6 +607,54 @@ public static class MultiStrategySelfTests
         }
     }
 
+
+    private static void TestFrozenOrbGroup3Replay()
+    {
+        var dates = Enumerable.Range(0, 80)
+            .Select(i => new DateOnly(2026, 2, 2).AddDays(i))
+            .Where(d => d.DayOfWeek is not DayOfWeek.Saturday and
+                not DayOfWeek.Sunday).Take(45).ToArray();
+        var older = dates.Take(35).SelectMany(CreateFullSession)
+            .OrderBy(x => x.T).ToArray();
+        var newer = dates.Skip(35).SelectMany(CreateFullSession)
+            .OrderBy(x => x.T).ToArray();
+        using var output = new StringWriter();
+        var saved = Console.Out;
+        try
+        {
+            Console.SetOut(output);
+            var historical = OrbGroup3ReplayRunner.FitAndReplayHistorical(
+                older, older, originalAnchorRequired: false);
+            var forward = OrbGroup3ReplayRunner.ReplayRecent(
+                historical.Model, historical.Sample, newer, newer);
+            Ensure(historical.Sample.Sessions.Count == 35 &&
+                historical.Split.TrainCount == 21 &&
+                forward.Sessions.Count == 10 &&
+                historical.Model.GroupCount == 4,
+                "Only original training sessions must fit four Group 3 centroids.");
+            foreach (var set in new[] { historical.Sample, forward })
+            {
+                var selectedDays = set.Sessions.Where((_, i) =>
+                    set.AssignedGroups[i] == 3).Select(x => x.Day).ToHashSet();
+                Ensure(set.Trades.All(x =>
+                    x.VariantId == 14051 &&
+                    x.Kind == MultiStrategyKind.Orb &&
+                    selectedDays.Contains(x.Day)),
+                    "Frozen group 3 replay cannot generate trades in other groups.");
+            }
+            OrbGroup3ReplayRunner.Report(historical, forward);
+            var printed = output.ToString();
+            Ensure(printed.Contains("ORB_GROUP3_PERIOD,HISTORICAL_TRAIN_IN_SAMPLE") &&
+                printed.Contains("ORB_GROUP3_PERIOD,HISTORICAL_VALIDATION") &&
+                printed.Contains("ORB_GROUP3_PERIOD,HISTORICAL_TEST_PREVIOUSLY_EXAMINED") &&
+                printed.Contains("ORB_GROUP3_PERIOD,RECENT_FORWARD_RESEARCH") &&
+                printed.Contains("ORB_GROUP3_COMBINED,") &&
+                printed.Contains("ORB PROGRESS [6/7]"),
+                "Group 3 replay must disclose all chronological historical and forward sections.");
+        }
+        finally { Console.SetOut(saved); }
+        Console.WriteLine("PASS: frozen Group 3 replay uses only matching windows, original variant, and newer SQL dates.");
+    }
 
     private static void TestOrbResearchProgress()
     {

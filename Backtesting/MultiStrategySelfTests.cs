@@ -636,11 +636,17 @@ public static class MultiStrategySelfTests
             {
                 var selectedDays = set.Sessions.Where((_, i) =>
                     set.AssignedGroups[i] == 3).Select(x => x.Day).ToHashSet();
-                Ensure(set.Trades.All(x =>
+                Ensure(set.Trades.Concat(set.LegacyTrades).All(x =>
                     x.VariantId == 14051 &&
                     x.Kind == MultiStrategyKind.Orb &&
                     selectedDays.Contains(x.Day)),
-                    "Frozen group 3 replay cannot generate trades in other groups.");
+                    "Both Group 3 stop policies must trade only Group 3.");
+                Ensure(set.Trades.All(x => x.ExitReason != "invalid-stop-close"),
+                    "Corrected Group 3 cannot invent a candle-close exit for invalid stops.");
+                Ensure(set.Trades.Select(x => (x.Day, x.EntryAt, x.Side, x.Entry))
+                    .SequenceEqual(set.LegacyTrades.Select(x =>
+                        (x.Day, x.EntryAt, x.Side, x.Entry))),
+                    "Changing stop behavior cannot change any Group 3 entry.");
             }
             OrbGroup3ReplayRunner.Report(historical, forward);
             var printed = output.ToString();
@@ -648,7 +654,11 @@ public static class MultiStrategySelfTests
                 printed.Contains("ORB_GROUP3_PERIOD,HISTORICAL_VALIDATION") &&
                 printed.Contains("ORB_GROUP3_PERIOD,HISTORICAL_TEST_PREVIOUSLY_EXAMINED") &&
                 printed.Contains("ORB_GROUP3_PERIOD,RECENT_FORWARD_RESEARCH") &&
+                printed.Contains("ORB_GROUP3_LEGACY_PERIOD,HISTORICAL_VALIDATION") &&
+                printed.Contains("ORB_GROUP3_LEGACY_PERIOD,RECENT_FORWARD_RESEARCH") &&
                 printed.Contains("ORB_GROUP3_COMBINED,") &&
+                printed.Contains("ORB_GROUP3_LEGACY_COMBINED,") &&
+                printed.Contains("ORB_GROUP3_STOP_POLICY,") &&
                 printed.Contains("ORB PROGRESS [6/7]"),
                 "Group 3 replay must disclose all chronological historical and forward sections.");
         }
@@ -1289,14 +1299,25 @@ public static class MultiStrategySelfTests
             MultiStrategyKind.Orb, 0, 0m, 0m, 0m, 0m,
             90, 150m, EconomicEventRule.Off);
         var original = MultiStrategyEngine.Generate(candidate, sessions, orb);
-        var reversed = MultiStrategyEngine.Generate(candidate with {
+        var reversedVariant = candidate with {
             SignalMode = SignalMode.Reversed
-        }, sessions, orb);
-        Ensure(original.Count == 1 && reversed.Count == 1,
+        };
+        var reversed = MultiStrategyEngine.Generate(reversedVariant, sessions, orb);
+        var corrected = MultiStrategyEngine.Generate(reversedVariant, sessions, orb,
+            InvalidProtectiveStopPolicy.KeepLastValidStop);
+        Ensure(original.Count == 1 && reversed.Count == 1 &&
+               corrected.Count == 1,
             "ORB must simulate both a genuine original and reversed signal " +
             "(original=" + original.Count + ", reversed=" + reversed.Count + ").");
         var a = original.Values.Single();
         var b = reversed.Values.Single();
+        var c = corrected.Values.Single();
+        Ensure(c.ExitReason != "invalid-stop-close" &&
+               c.EntryAt == b.EntryAt &&
+               c.Entry == b.Entry && c.Side == b.Side &&
+               c.ExitAt > c.EntryAt && c.Costs == b.Costs,
+            "Corrected ORB stop policy must keep the next-open entry and " +
+            "must never use an invalid-stop artificial closing-price fill.");
         Ensure(a.EntryAt == b.EntryAt && a.Entry == b.Entry &&
                a.Side != b.Side &&
                a.Costs == b.Costs && a.ExitAt > a.EntryAt &&

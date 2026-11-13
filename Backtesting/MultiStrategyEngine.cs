@@ -130,7 +130,9 @@ public static class MultiStrategyEngine
 
     public static IReadOnlyDictionary<DateOnly, MultiStrategyTrade> Generate(
         MultiStrategyVariant variant, IReadOnlyList<MultiSession> sessions,
-        IReadOnlyList<SessionData> originalOrbSessions)
+        IReadOnlyList<SessionData> originalOrbSessions,
+        InvalidProtectiveStopPolicy invalidStopPolicy =
+            InvalidProtectiveStopPolicy.LegacyClose)
     {
         var result = new Dictionary<DateOnly, MultiStrategyTrade>();
         if (variant.SignalMode == SignalMode.Disabled)
@@ -147,7 +149,8 @@ public static class MultiStrategyEngine
                 variant.WeekdayMask, variant.EventRule);
             var simulated = OptimizationEngine.Evaluate(orbConfig,
                 originalOrbSessions, keepTrades: true,
-                invertFirstSignal: variant.SignalMode == SignalMode.Reversed);
+                invertFirstSignal: variant.SignalMode == SignalMode.Reversed,
+                invalidStopPolicy: invalidStopPolicy);
             foreach (var t in simulated.DetailedTrades ?? [])
             {
                 // There are no MES reversals in the multi-strategy grid.
@@ -159,6 +162,10 @@ public static class MultiStrategyEngine
             }
             return result;
         }
+
+        if (invalidStopPolicy != InvalidProtectiveStopPolicy.LegacyClose)
+            throw new ArgumentException("Corrected protective-stop policy applies to ORB only.",
+                nameof(invalidStopPolicy));
 
         var recipe = new SignalKey(variant.Kind, variant.Lookback,
             variant.Threshold, variant.VolumeMultiple, variant.StartShiftMinutes,

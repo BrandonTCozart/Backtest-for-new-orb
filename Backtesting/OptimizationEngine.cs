@@ -2,6 +2,12 @@ using Orb;
 
 namespace Backtest_for_new_orb;
 
+// Legacy behavior closed a position immediately at the candle close when a
+// proposed protective stop would be on the wrong side of the market. The
+// corrected research path simply ignores that proposed stop and leaves the
+// previous valid stop active. Keep legacy available solely for comparison.
+public enum InvalidProtectiveStopPolicy { LegacyClose, KeepLastValidStop }
+
 public static class OptimizationEngine
 {
     private static readonly TimeSpan OrbEnd = new(9, 45, 0);
@@ -9,7 +15,8 @@ public static class OptimizationEngine
     private static readonly TimeSpan Stage6Cutoff = new(13, 0, 0);
     private readonly record struct TradeKey(
         DateOnly Day, int SignalIndex, TradeDirection Side, int Quantity,
-        bool Mes, decimal RiskCap, decimal Fallback, decimal EsTrail);
+        bool Mes, decimal RiskCap, decimal Fallback, decimal EsTrail,
+        InvalidProtectiveStopPolicy InvalidStopPolicy);
     private readonly record struct EntryKey(
         DateOnly Day, TimeSpan Cutoff, decimal RangeMin, decimal RangeMax,
         VwapRule Vwap, decimal BreakoutPoints, decimal VolumeMultiplier, bool Retest);
@@ -28,10 +35,13 @@ public static class OptimizationEngine
 
     public static OptimizationResult Evaluate(
         OptimizationConfig config, IReadOnlyList<SessionData> sessions,
-        bool keepTrades = false, bool invertFirstSignal = false)
+        bool keepTrades = false, bool invertFirstSignal = false,
+        InvalidProtectiveStopPolicy invalidStopPolicy =
+            InvalidProtectiveStopPolicy.LegacyClose)
     {
         Validate(config);
-        return Aggregate(config, ComputeDayOutcomes(config, sessions, invertFirstSignal), keepTrades);
+        return Aggregate(config, ComputeDayOutcomes(config, sessions,
+            invertFirstSignal, invalidStopPolicy), keepTrades);
     }
 
     // Simulate the expensive intraday entry/stop logic only ONCE per base
@@ -147,7 +157,9 @@ public static class OptimizationEngine
 
     private static List<DayOutcome> ComputeDayOutcomes(
         OptimizationConfig config, IReadOnlyList<SessionData> sessions,
-        bool invertFirstSignal = false)
+        bool invertFirstSignal = false,
+        InvalidProtectiveStopPolicy invalidStopPolicy =
+            InvalidProtectiveStopPolicy.LegacyClose)
     {
         var outcomes = new List<DayOutcome>(sessions.Count);
         var logic = new OrbStrategy { EsTrailingDistance = config.EsTrailDollars };
@@ -171,7 +183,7 @@ public static class OptimizationEngine
             var first = SimulateCached(session, logic, entry.SignalIndex,
                 tradedSide, config.EsQuantity, isMes: false,
                 config.Risk.MaxRisk, config.Risk.FallbackRisk,
-                config.EsTrailDollars);
+                config.EsTrailDollars, invalidStopPolicy);
 
             SimulatedTrade? reversal = null;
             if (first is not null && config.MesQuantity > 0 &&
@@ -185,7 +197,7 @@ public static class OptimizationEngine
                         resignal.Side, config.MesQuantity, isMes: true,
                         OrbStrategy.Stage6MaxInitialRisk,
                         OrbStrategy.Stage6DefaultInitialStopRisk,
-                        config.EsTrailDollars);
+                        config.EsTrailDollars, invalidStopPolicy);
                 }
             }
             outcomes.Add(new DayOutcome(session.Day, first, reversal));
@@ -372,20 +384,23 @@ public static class OptimizationEngine
     private static SimulatedTrade? SimulateCached(
         SessionData day, OrbStrategy logic, int signalIndex, TradeDirection side,
         int qty, bool isMes, decimal riskCap, decimal fallbackRisk,
-        decimal esTrailingDistance)
+        decimal esTrailingDistance,
+        InvalidProtectiveStopPolicy invalidStopPolicy)
     {
         var key = new TradeKey(day.Day, signalIndex, side, qty, isMes,
-            riskCap, fallbackRisk, isMes ? 0m : esTrailingDistance);
+            riskCap, fallbackRisk, isMes ? 0m : esTrailingDistance,
+            invalidStopPolicy);
         if (TradeCache.TryGetValue(key, out var cached)) return cached;
         var calculated = SimulateTrade(day, logic, signalIndex, side, qty,
-            isMes, riskCap, fallbackRisk);
+            isMes, riskCap, fallbackRisk, invalidStopPolicy);
         TradeCache[key] = calculated;
         return calculated;
     }
 
     private static SimulatedTrade? SimulateTrade(
         SessionData day, OrbStrategy logic, int signalIndex, TradeDirection side,
-        int qty, bool isMes, decimal riskCap, decimal fallbackRisk)
+        int qty, bool isMes, decimal riskCap, decimal fallbackRisk,
+        InvalidProtectiveStopPolicy invalidStopPolicy)
     {
         var bars = day.Bars;
         if (qty <= 0 || signalIndex + 1 >= bars.Length ||
@@ -475,7 +490,16 @@ public static class OptimizationEngine
                         logic.IsMoreProtective(side, candidate, existing))
                     {
                         if (!logic.IsValidProtectiveStop(trade, candidate, candle.C))
-                            return Make("invalid-stop-close", candle.C);
+                        {
+                            if (invalidStopPolicy ==
+                                InvalidProtectiveStopPolicy.LegacyClose)
+                                return Make("invalid-stop-close", candle.C);
+                            // Do NOT manufacture a fill at candle close.
+                            // The active stop stays in force. Retry this
+                            // stage on the next completed candle; do not
+                            // advance its state without installing its stop.
+                            break;
+                        }
                         trade.ConfirmedStop = candidate;
                     }
                 }

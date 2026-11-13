@@ -36,7 +36,8 @@ public static class OrbGroup3ReplayRunner
     internal sealed record ReplaySample(
         string Source, IReadOnlyList<MultiSession> Sessions,
         IReadOnlyList<int> AssignedGroups,
-        IReadOnlyList<MultiStrategyTrade> Trades)
+        IReadOnlyList<MultiStrategyTrade> Trades,
+        IReadOnlyList<MultiStrategyTrade> LegacyTrades)
     {
         public int GroupDays => AssignedGroups.Count(x => x == GroupId);
     }
@@ -136,8 +137,8 @@ public static class OrbGroup3ReplayRunner
             features.Take(trainingCount).ToArray(), GroupCount);
         progress.Complete();
 
-        progress.Start(4, "Replay only Group 3 across all historical dates", 1);
-        var sample = Replay("MES_DATA_2020_2025", historical, model);
+        progress.Start(4, "Replay Group 3 (corrected and legacy stops)", 2);
+        var sample = Replay("MES_DATA_2020_2025", historical, model, progress);
         progress.Complete();
         return new FrozenHistorical(model, split, sample);
     }
@@ -148,12 +149,12 @@ public static class OrbGroup3ReplayRunner
         OrbResearchProgress? progress = null)
     {
         progress ??= new OrbResearchProgress();
-        progress.Start(6, "Prepare and replay frozen Group 3 on newer data", 4);
+        progress.Start(6, "Prepare and replay frozen Group 3 on newer data", 5);
         var recent = Prepare(active, all, progress, startNewStage: false);
         if (recent.Sessions[0].Day <= historical.Sessions[^1].Day)
             throw new InvalidOperationException(
                 "Recent SQL overlaps historical SQL; refusing double-counted trades.");
-        var result = Replay("MES_DATA", recent, frozenModel);
+        var result = Replay("MES_DATA", recent, frozenModel, progress);
         progress.Complete();
         return result;
     }
@@ -161,7 +162,8 @@ public static class OrbGroup3ReplayRunner
     // All sessions are classified, but ONLY Group 3 sessions are simulated.
     // Other groups are not traded, scored or optimized in this replay.
     internal static ReplaySample Replay(
-        string source, Prepared prepared, OpeningClusterModel frozenModel)
+        string source, Prepared prepared, OpeningClusterModel frozenModel,
+        OrbResearchProgress? progress = null)
     {
         var sessions = prepared.Sessions;
         var profiles = OrbOpeningPatternExperiment.ExtractProfiles(sessions);
@@ -175,15 +177,32 @@ public static class OrbGroup3ReplayRunner
                 selectedOrb.Add(prepared.Orb[i]);
             }
         OptimizationEngine.ClearCaches();
-        var trades = MultiStrategyEngine.Generate(FrozenVariant,
-                selectedSessions, selectedOrb)
+        var corrected = MultiStrategyEngine.Generate(FrozenVariant,
+                selectedSessions, selectedOrb,
+                InvalidProtectiveStopPolicy.KeepLastValidStop)
             .Values.OrderBy(t => t.EntryAt).ToArray();
+        progress?.Advance();
+        // Replay the previous policy from the identical group assignments and
+        // exact same fixed variant, so any difference is caused by stop handling.
+        OptimizationEngine.ClearCaches();
+        var legacy = MultiStrategyEngine.Generate(FrozenVariant,
+                selectedSessions, selectedOrb,
+                InvalidProtectiveStopPolicy.LegacyClose)
+            .Values.OrderBy(t => t.EntryAt).ToArray();
+        progress?.Advance();
         var groupDates = selectedSessions.Select(x => x.Day).ToHashSet();
-        if (trades.Any(t => !groupDates.Contains(t.Day) ||
-                            t.VariantId != FrozenVariant.Id))
+        if (corrected.Concat(legacy).Any(t =>
+                !groupDates.Contains(t.Day) || t.VariantId != FrozenVariant.Id))
             throw new InvalidOperationException(
                 "Group 3 replay generated a trade outside Group 3.");
-        return new ReplaySample(source, sessions, groups, trades);
+        if (corrected.Any(t => t.ExitReason == "invalid-stop-close"))
+            throw new InvalidOperationException(
+                "Corrected stop handling must never close at a fabricated invalid-stop price.");
+        if (!corrected.Select(t => (t.Day, t.EntryAt, t.Side, t.Entry))
+                .SequenceEqual(legacy.Select(t => (t.Day, t.EntryAt, t.Side, t.Entry))))
+            throw new InvalidOperationException(
+                "Changing stop policy must not change qualifying entry signals.");
+        return new ReplaySample(source, sessions, groups, corrected, legacy);
     }
 
     internal static void Report(FrozenHistorical historical, ReplaySample recent)
@@ -194,19 +213,25 @@ public static class OrbGroup3ReplayRunner
             "training_start=" + Day(older.Sessions[0].Day) +
             ",training_end=" + Day(older.Sessions[s.TrainEnd - 1].Day) +
             ",variant_settings=" + FrozenVariant.Parameters);
-        Console.WriteLine("ORB_GROUP3_PERIOD,period,source,start,end,valid_days,group3_days," +
+        Console.WriteLine("ORB_GROUP3_STOP_POLICY,corrected=KeepLastValidStop," +
+            "legacy=LegacyClose,config=14051,groups_frozen=true");
+        const string heading = "period,source,start,end,valid_days,group3_days," +
             "trades,wins,win_rate,net_usd,max_drawdown_usd,profit_factor," +
-            "net_at_20_cost,net_at_30_cost");
+            "net_at_20_cost,net_at_30_cost";
+        Console.WriteLine("ORB_GROUP3_PERIOD," + heading);
+        Console.WriteLine("ORB_GROUP3_LEGACY_PERIOD," + heading);
 
-        void Period(string name, ReplaySample r, int start, int end)
+        void Period(string name, ReplaySample r, int start, int end, bool legacy)
         {
             var first = r.Sessions[start].Day;
             var last = r.Sessions[end - 1].Day;
             var eligible = r.AssignedGroups.Skip(start).Take(end - start)
                 .Count(x => x == GroupId);
-            var trades = r.Trades.Where(t => t.Day >= first && t.Day <= last).ToArray();
+            var trades = (legacy ? r.LegacyTrades : r.Trades)
+                .Where(t => t.Day >= first && t.Day <= last).ToArray();
             var score = MultiScore.From(trades);
-            Console.WriteLine("ORB_GROUP3_PERIOD," + name + "," + r.Source +
+            Console.WriteLine((legacy ? "ORB_GROUP3_LEGACY_PERIOD," :
+                "ORB_GROUP3_PERIOD,") + name + "," + r.Source +
                 "," + Day(first) + "," + Day(last) +
                 "," + (end - start) + "," + eligible +
                 "," + score.Trades + "," + score.Wins +
@@ -216,11 +241,16 @@ public static class OrbGroup3ReplayRunner
                 "," + F(score.Net - 10m * score.Trades) +
                 "," + F(score.Net - 20m * score.Trades));
         }
-        Period("HISTORICAL_TRAIN_IN_SAMPLE", older, 0, s.TrainEnd);
-        Period("HISTORICAL_VALIDATION", older, s.TrainEnd, s.ValidationEnd);
-        Period("HISTORICAL_TEST_PREVIOUSLY_EXAMINED", older, s.ValidationEnd, s.Count);
-        Period("HISTORICAL_ALL", older, 0, s.Count);
-        Period("RECENT_FORWARD_RESEARCH", recent, 0, recent.Sessions.Count);
+        foreach (var legacy in new[] { false, true })
+        {
+            Period("HISTORICAL_TRAIN_IN_SAMPLE", older, 0, s.TrainEnd, legacy);
+            Period("HISTORICAL_VALIDATION", older, s.TrainEnd, s.ValidationEnd, legacy);
+            Period("HISTORICAL_TEST_PREVIOUSLY_EXAMINED",
+                older, s.ValidationEnd, s.Count, legacy);
+            Period("HISTORICAL_ALL", older, 0, s.Count, legacy);
+            Period("RECENT_FORWARD_RESEARCH",
+                recent, 0, recent.Sessions.Count, legacy);
+        }
 
         // Benchmark is the 80.95% result the user is asking to reproduce.
         // This is a diagnostic ONLY: Group 3 was chosen after this was seen.
@@ -229,63 +259,84 @@ public static class OrbGroup3ReplayRunner
             older.Sessions[^1].Day == new DateOnly(2025, 9, 8))
         {
             var testStart = older.Sessions[s.ValidationEnd].Day;
-            var score = MultiScore.From(older.Trades.Where(t => t.Day >= testStart));
-            Console.WriteLine("ORB_GROUP3_REPRODUCTION," +
+            var score = MultiScore.From(
+                older.LegacyTrades.Where(t => t.Day >= testStart));
+            var correctedScore = MultiScore.From(
+                older.Trades.Where(t => t.Day >= testStart));
+            Console.WriteLine("ORB_GROUP3_REPRODUCTION,legacy_" +
                 (score.Trades == 21 && score.Wins == 17 && score.Net == 2965m
                     ? "PASS" : "MISMATCH") +
                 ",prior_test_trades=21,prior_test_wins=17,prior_test_net=2965.00" +
                 ",actual_trades=" + score.Trades +
                 ",actual_wins=" + score.Wins +
-                ",actual_net=" + F(score.Net));
+                ",actual_net=" + F(score.Net) +
+                ",corrected_trades=" + correctedScore.Trades +
+                ",corrected_wins=" + correctedScore.Wins +
+                ",corrected_net=" + F(correctedScore.Net));
         }
-        var allTrades = older.Trades.Concat(recent.Trades)
-            .OrderBy(t => t.EntryAt).ToArray();
-        var all = MultiScore.From(allTrades);
-        Console.WriteLine("ORB_GROUP3_COMBINED,all_history_and_recent,days=" +
-            (older.Sessions.Count + recent.Sessions.Count) +
-            ",group3_days=" + (older.GroupDays + recent.GroupDays) +
-            ",trades=" + all.Trades + ",wins=" + all.Wins +
-            ",win_rate=" + F(all.WinRate) + ",net=" + F(all.Net) +
-            ",drawdown=" + F(all.Drawdown) +
-            ",net_at_20_cost=" + F(all.Net - 10m * all.Trades) +
-            ",net_at_30_cost=" + F(all.Net - 20m * all.Trades));
+        foreach (var legacy in new[] { false, true })
+        {
+            var allTrades = (legacy ? older.LegacyTrades : older.Trades)
+                .Concat(legacy ? recent.LegacyTrades : recent.Trades)
+                .OrderBy(t => t.EntryAt).ToArray();
+            var all = MultiScore.From(allTrades);
+            Console.WriteLine((legacy ? "ORB_GROUP3_LEGACY_COMBINED," :
+                "ORB_GROUP3_COMBINED,") + "all_history_and_recent,days=" +
+                (older.Sessions.Count + recent.Sessions.Count) +
+                ",group3_days=" + (older.GroupDays + recent.GroupDays) +
+                ",trades=" + all.Trades + ",wins=" + all.Wins +
+                ",win_rate=" + F(all.WinRate) + ",net=" + F(all.Net) +
+                ",drawdown=" + F(all.Drawdown) +
+                ",net_at_20_cost=" + F(all.Net - 10m * all.Trades) +
+                ",net_at_30_cost=" + F(all.Net - 20m * all.Trades));
+        }
 
-        Console.WriteLine("ORB_GROUP3_YEAR,source,year,group3_days,trades,wins," +
-            "win_rate,net_usd,max_drawdown_usd");
-        foreach (var set in new[] { older, recent })
-            foreach (var bucket in set.Sessions.GroupBy(x => x.Day.Year))
-            {
-                var yearTrades = set.Trades.Where(x => x.Day.Year == bucket.Key).ToArray();
-                var yearScore = MultiScore.From(yearTrades);
-                Console.WriteLine("ORB_GROUP3_YEAR," + set.Source + "," + bucket.Key +
-                    "," + bucket.Count(d =>
-                        set.AssignedGroups[IndexOfDay(set.Sessions, d.Day)] == GroupId) +
-                    "," + yearScore.Trades + "," + yearScore.Wins +
-                    "," + F(yearScore.WinRate) + "," + F(yearScore.Net) +
-                    "," + F(yearScore.Drawdown));
-            }
+        const string yearHeading = "source,year,group3_days,trades,wins," +
+            "win_rate,net_usd,max_drawdown_usd";
+        Console.WriteLine("ORB_GROUP3_YEAR," + yearHeading);
+        Console.WriteLine("ORB_GROUP3_LEGACY_YEAR," + yearHeading);
+        foreach (var legacy in new[] { false, true })
+            foreach (var set in new[] { older, recent })
+                foreach (var bucket in set.Sessions.GroupBy(x => x.Day.Year))
+                {
+                    var yearTrades = (legacy ? set.LegacyTrades : set.Trades)
+                        .Where(x => x.Day.Year == bucket.Key).ToArray();
+                    var yearScore = MultiScore.From(yearTrades);
+                    Console.WriteLine((legacy ? "ORB_GROUP3_LEGACY_YEAR," :
+                        "ORB_GROUP3_YEAR,") + set.Source + "," + bucket.Key +
+                        "," + bucket.Count(d =>
+                            set.AssignedGroups[IndexOfDay(set.Sessions, d.Day)] == GroupId) +
+                        "," + yearScore.Trades + "," + yearScore.Wins +
+                        "," + F(yearScore.WinRate) + "," + F(yearScore.Net) +
+                        "," + F(yearScore.Drawdown));
+                }
 
-        Console.WriteLine("ORB_GROUP3_TRADE,source,period,day,contract,side,entry_time_et," +
-            "exit_time_et,entry,exit,exit_reason,net_usd");
-        foreach (var (set, isHistorical) in new[] { (older, true), (recent, false) })
-            foreach (var trade in set.Trades)
-            {
-                var idx = isHistorical ? IndexOfDay(older.Sessions, trade.Day) : 0;
-                var period = !isHistorical ? "RECENT_FORWARD" :
-                    idx < s.TrainEnd ? "HISTORICAL_TRAIN" :
-                    idx < s.ValidationEnd ? "HISTORICAL_VALIDATION" :
-                    "HISTORICAL_TEST";
-                Console.WriteLine("ORB_GROUP3_TRADE," + set.Source + "," + period +
-                    "," + Day(trade.Day) + "," + trade.Contract + "," + trade.Side +
-                    "," + Et(trade.EntryAt) + "," + Et(trade.ExitAt) +
-                    "," + F(trade.Entry) + "," + F(trade.Exit) +
-                    "," + trade.ExitReason + "," + F(trade.Net));
-            }
-        Console.WriteLine("RESEARCH CAVEAT: Group 3 and variant 14051 were chosen " +
-            "AFTER inspecting 2024-2025 test returns; its historical 80.95% " +
-            "win rate is post-selection, not unbiased validation. Newer " +
-            "2025-2026 results are informative but prior project research " +
-            "has also examined this period. No real trades or SQL writes.");
+        const string tradeHeading = "source,period,day,contract,side,entry_time_et," +
+            "exit_time_et,entry,exit,exit_reason,net_usd";
+        Console.WriteLine("ORB_GROUP3_TRADE," + tradeHeading);
+        Console.WriteLine("ORB_GROUP3_LEGACY_TRADE," + tradeHeading);
+        foreach (var legacy in new[] { false, true })
+            foreach (var (set, isHistorical) in new[] { (older, true), (recent, false) })
+                foreach (var trade in legacy ? set.LegacyTrades : set.Trades)
+                {
+                    var idx = isHistorical ? IndexOfDay(older.Sessions, trade.Day) : 0;
+                    var period = !isHistorical ? "RECENT_FORWARD" :
+                        idx < s.TrainEnd ? "HISTORICAL_TRAIN" :
+                        idx < s.ValidationEnd ? "HISTORICAL_VALIDATION" :
+                        "HISTORICAL_TEST";
+                    Console.WriteLine((legacy ? "ORB_GROUP3_LEGACY_TRADE," :
+                        "ORB_GROUP3_TRADE,") + set.Source + "," + period +
+                        "," + Day(trade.Day) + "," + trade.Contract + "," + trade.Side +
+                        "," + Et(trade.EntryAt) + "," + Et(trade.ExitAt) +
+                        "," + F(trade.Entry) + "," + F(trade.Exit) +
+                        "," + trade.ExitReason + "," + F(trade.Net));
+                }
+        Console.WriteLine("RESEARCH CAVEAT: Corrected stop replay ignores a proposed " +
+            "protective stop on the wrong side of the latest candle close; " +
+            "it retains the prior stop and retries the stage on later candles. " +
+            "LegacyClose figures retain the old artificial candle-close exit. " +
+            "Historical 80.95% was post-selection; neither series is an " +
+            "independent unseen live result. No real trades or SQL writes.");
     }
 
     private static int IndexOfDay(IReadOnlyList<MultiSession> sessions, DateOnly day)

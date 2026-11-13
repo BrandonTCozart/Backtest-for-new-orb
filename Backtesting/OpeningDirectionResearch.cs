@@ -395,15 +395,15 @@ public static class OpeningDirectionResearch
                     }).ToArray();
                     writer.WriteLine("DIRECTION_RESEARCH_PREMARKET," + period + "," +
                         window + "," + SignName(sign) + "," + group.Length +
-                        "," + Count(group, Target.Opening15, Outcome.Up) +
-                        "," + Count(group, Target.Opening15, Outcome.Down) +
-                        "," + Count(group, Target.FirstBreakBy11, Outcome.Up) +
-                        "," + Count(group, Target.FirstBreakBy11, Outcome.Down) +
+                        "," + CountOutcome(group, Target.Opening15, Outcome.Up) +
+                        "," + CountOutcome(group, Target.Opening15, Outcome.Down) +
+                        "," + CountOutcome(group, Target.FirstBreakBy11, Outcome.Up) +
+                        "," + CountOutcome(group, Target.FirstBreakBy11, Outcome.Down) +
                         "," + group.Count(x => !Binary(x.FirstBreakBy11)) +
-                        "," + Count(group, Target.RestOfDay, Outcome.Up) +
-                        "," + Count(group, Target.RestOfDay, Outcome.Down) +
-                        "," + Count(group, Target.FullRth, Outcome.Up) +
-                        "," + Count(group, Target.FullRth, Outcome.Down));
+                        "," + CountOutcome(group, Target.RestOfDay, Outcome.Up) +
+                        "," + CountOutcome(group, Target.RestOfDay, Outcome.Down) +
+                        "," + CountOutcome(group, Target.FullRth, Outcome.Up) +
+                        "," + CountOutcome(group, Target.FullRth, Outcome.Down));
                 }
         writer.WriteLine("DIRECTION_RESEARCH_CORRELATION,period,premarket_window," +
             "outcome,paired_days,pearson_r,sign_agreement_pct");
@@ -426,10 +426,10 @@ public static class OpeningDirectionResearch
                         x.FourAm.Sign == pre).ToArray();
                     writer.WriteLine("DIRECTION_RESEARCH_CONDITIONAL," + period + "," +
                         shape + "," + SignName(pre) + "," + matching.Length + "," +
-                        Count(matching, Target.FirstBreakBy11, Outcome.Up) + "," +
-                        Count(matching, Target.FirstBreakBy11, Outcome.Down) + "," +
-                        Count(matching, Target.RestOfDay, Outcome.Up) + "," +
-                        Count(matching, Target.RestOfDay, Outcome.Down));
+                        CountOutcome(matching, Target.FirstBreakBy11, Outcome.Up) + "," +
+                        CountOutcome(matching, Target.FirstBreakBy11, Outcome.Down) + "," +
+                        CountOutcome(matching, Target.RestOfDay, Outcome.Up) + "," +
+                        CountOutcome(matching, Target.RestOfDay, Outcome.Down));
                 }
         }
 
@@ -559,7 +559,7 @@ public static class OpeningDirectionResearch
         PremarketWindow.EightAm => x.EightAm,
         _ => throw new ArgumentOutOfRangeException(nameof(w))
     };
-    private static int Count(SessionRow[] x, Target t, Outcome o) =>
+    private static int CountOutcome(SessionRow[] x, Target t, Outcome o) =>
         x.Count(row => TargetOf(row, t) == o);
     private static string SignName(int sign) =>
         sign < 0 ? "DOWN" : sign > 0 ? "UP" : "FLAT";

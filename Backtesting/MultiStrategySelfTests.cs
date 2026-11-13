@@ -167,6 +167,7 @@ public static class MultiStrategySelfTests
             TestOpeningDirectionResearch(date);
             TestOpeningBreakoutValidation(date);
             TestBreakoutQualityResearch(date);
+            TestWindowExpectedValueResearch(date);
             Ensure(OrbGroup3ReplayRunner.FrozenVariant ==
                 (deepVariants.Single(x => x.Id == 14051) with {
                     SignalMode = SignalMode.Reversed
@@ -964,6 +965,145 @@ public static class MultiStrategySelfTests
             "conditional calibration, trade filters and period summaries.");
         Console.WriteLine("PASS: breakout-quality target-before-stop causality, " +
             "frozen probabilities, training-only thresholds and cost report.");
+    }
+
+    private static void TestWindowExpectedValueResearch(DateOnly date)
+    {
+        var baseMarket = CreateFullSession(date).OrderBy(x => x.T).ToArray();
+        var baseRow = OpeningDirectionResearch.Extract(baseMarket).Single();
+        var bars = (PriceBar[])baseRow.Rth.Clone();
+        for (var i = 0; i < 35; i++)
+        {
+            var previous = bars[i].C;
+            bars[i] = bars[i] with {
+                C = new Candle {
+                    T = previous.T, O = 5000m, H = 5002m,
+                    L = 4998m, C = 5000m, V = 100
+                }
+            };
+        }
+        var signal = bars[35].C;
+        bars[35] = bars[35] with {
+            C = new Candle {
+                T = signal.T, O = 5001m, H = 5004m,
+                L = 5000m, C = 5003m, V = 500
+            }
+        };
+        var entry = bars[36].C;
+        bars[36] = bars[36] with {
+            C = new Candle {
+                T = entry.T, O = 5003m, H = 5020m,
+                L = 5002m, C = 5019m, V = 200
+            }
+        };
+        var fixture = baseRow with { Rth = bars };
+        foreach (var scenario in WindowExpectedValueResearch.Scenarios)
+        {
+            var observation = WindowExpectedValueResearch.Observe(
+                fixture, scenario);
+            Ensure(observation.Exclusion ==
+                   WindowExpectedValueResearch.Exclusion.None &&
+                   observation.Candidate is not null &&
+                   observation.Candidate.SignalIndex == 35 &&
+                   observation.Candidate.Fill.EntryIndex == 36 &&
+                   observation.Candidate.Fill.EntryAt == bars[36].T &&
+                   observation.Candidate.Fill.Net == 740m,
+                "Window study must use the first AFTER-decision completed " +
+                "breakout, with a next-bar-open entry and a fixed trade outcome.");
+        }
+        var win = WindowExpectedValueResearch.Observe(
+            fixture, WindowExpectedValueResearch.Scenarios[3]).Candidate!;
+        // Future bar can alter net outcome without changing ANY future-blind
+        // model feature, including the extra early 15 or completed post5 bars.
+        var losing = (PriceBar[])bars.Clone();
+        var bad = losing[36].C;
+        losing[36] = losing[36] with {
+            C = new Candle {
+                T = bad.T, O = 5003m, H = 5020m,
+                L = 4990m, C = 5003m, V = bad.V
+            }
+        };
+        var loss = WindowExpectedValueResearch.Observe(
+            fixture with { Rth = losing },
+            WindowExpectedValueResearch.Scenarios[3]).Candidate!;
+        Ensure(loss.Fill.Reason == "stop_first_ambiguous" &&
+               loss.Fill.Net == -510m &&
+               win.Core.SequenceEqual(loss.Core) &&
+               win.Shape.SequenceEqual(loss.Shape) &&
+               win.Early.SequenceEqual(loss.Early) &&
+               win.Post.SequenceEqual(loss.Post),
+            "15/30 window EV features may not include next-open entry " +
+            "bar highs/lows or any trade-future outcomes.");
+
+        var changedPrior = (PriceBar[])bars.Clone();
+        var five = changedPrior[32].C;
+        changedPrior[32] = changedPrior[32] with {
+            C = new Candle {
+                T = five.T, O = 5000m, H = 5002m,
+                L = 4998m, C = 5001.5m, V = five.V * 8
+            }
+        };
+        var changed = WindowExpectedValueResearch.Observe(
+            fixture with { Rth = changedPrior },
+            WindowExpectedValueResearch.Scenarios[3]).Candidate!;
+        Ensure(changed.SignalIndex == win.SignalIndex &&
+               !changed.Post.SequenceEqual(win.Post),
+            "Five-minute post-window features should respond to " +
+            "already-completed pre-decision candles.");
+
+        var early = (PriceBar[])bars.Clone();
+        var first = early[17].C;
+        early[17] = early[17] with {
+            C = new Candle {
+                T = first.T, O = first.O, H = 5003m,
+                L = first.L, C = first.C, V = first.V
+            }
+        };
+        var noReplay = WindowExpectedValueResearch.Observe(
+            fixture with { Rth = early },
+            WindowExpectedValueResearch.Scenarios[1]);
+        Ensure(noReplay.Exclusion ==
+               WindowExpectedValueResearch.Exclusion.EarlyBreak,
+            "Delayed decisions must exclude prior boundary crossings " +
+            "instead of calling a future retouch the first break.");
+
+        var doubleTouch = (PriceBar[])bars.Clone();
+        var both = doubleTouch[35].C;
+        doubleTouch[35] = doubleTouch[35] with {
+            C = new Candle {
+                T = both.T, O = both.O, H = 5004m,
+                L = 4996m, C = both.C, V = both.V
+            }
+        };
+        var ambiguous = WindowExpectedValueResearch.Observe(
+            fixture with { Rth = doubleTouch },
+            WindowExpectedValueResearch.Scenarios[2]);
+        Ensure(ambiguous.Exclusion ==
+               WindowExpectedValueResearch.Exclusion.Ambiguous,
+            "Same one-minute candle touching both opening boundaries " +
+            "must be excluded without inventing a first price path.");
+
+        var candidates = Enumerable.Range(0, 100)
+            .Select(i => (i % 3 == 0 ? fixture : fixture with {
+                Rth = losing
+            }) with { Day = date.AddDays(i) }).ToArray();
+        using var output = new StringWriter();
+        WindowExpectedValueResearch.Report(candidates, candidates.Take(20)
+            .Select(x => x with { Day = x.Day.AddYears(2) }).ToArray(), output);
+        var report = output.ToString();
+        Ensure(report.Contains("WINDOW_EV_COHORT,ORB15_0945,VALIDATION") &&
+               report.Contains("WINDOW_EV_COHORT,ORB30_1000,VALIDATION") &&
+               report.Contains("WINDOW_EV_MODEL,ORB30_1000,VALIDATION,SHAPE_EARLY15") &&
+               report.Contains("WINDOW_EV_MODEL,ORB15_WAIT5_0950,VALIDATION,SHAPE_POST5") &&
+               report.Contains("WINDOW_EV_MODEL,ORB30_WAIT5_1005,RECENT_ALREADY_SEEN,SHAPE_EARLY15_POST5") &&
+               report.Contains("WINDOW_EV_FILTER,ORB15_0945,RECENT_ALREADY_SEEN") &&
+               report.Contains("WINDOW_EV_POST5,") &&
+               report.Contains("WINDOW_EV_PAIR15_30,") &&
+               report.Contains("WINDOW_EV_COMPLETE"),
+            "All 15/30 and five-minute post-window ablations must " +
+            "produce frozen paired predictions and cost-aware trade reports.");
+        Console.WriteLine("PASS: 15/30 opening-window EV, post-window causality, " +
+            "first breakout timing, fixed fill and matched training-only comparisons.");
     }
 
     private static void TestFrozenOrbGroup3Replay()

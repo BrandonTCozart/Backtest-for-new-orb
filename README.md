@@ -1,6 +1,6 @@
 # ES Multi-Strategy Backtester + Original ORB Optimizer
 
-Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The **current default is `BreakoutQualityResearch`**, a fast, single-threaded experiment estimating the probability of a breakout reaching a fixed profit target before its stop-loss. It runs a fixed hypothetical next-open execution replay, not an ORB configuration sweep or a live trading system. The original `OpeningDirectionResearch` and previous modes remain separately selectable. The earlier portfolio / ORB experiment modes remain available by changing `Backtest:Mode`. Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
+Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The **current default is `WindowExpectedValueResearch`**, a fast, single-threaded study of 15- and 30-minute opening ranges, the next five minutes of price action, and expected trade profitability. Earlier `BreakoutQualityResearch` and `OpeningDirectionResearch` modes remain available. The program is research-only, not an ORB configuration sweep or a live trading system. The earlier portfolio / ORB experiment modes remain available by changing `Backtest:Mode`. Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
 
 
 ### Adaptive configurations and candle features (November 2026)
@@ -60,7 +60,48 @@ The **RegimeAware** portfolio router competes against the existing single, fixed
 
 Regime thresholds are selected exclusively from training history (small, disclosed 16-threshold grid, optionally with chronological fallbacks), with frozen choices evaluated on later OOS dates. The console reports `FOLD_REGIME_COMPARE` for each fold and `REPLAY_REGIME_COMPARE`, `REPLAY_REGIME_AUDIT`, `REPLAY_TOTAL,RegimeComparison`, plus weekly and yearly regime comparison rows in the later frozen evaluation. This reports a trained regime alternative even when another router wins the training selection. These improvements **change which sessions and contracts enter the backtest**: older performance numbers and previously frozen configuration IDs are **not directly comparable**, and real SQL re-optimization/replay is required. The synthetic suite tests future-volume roll avoidance, decision cutoffs, future-bar immunity, six regime states, and parallel/serial parity. No actual SQL outcomes have been measured by CI.
 
-## Current default: breakout-quality probability study (November 2026)
+## New default: 15-minute vs. 30-minute ranges, five-minute after-window behavior, and expected value
+
+Set `Backtest:Mode=WindowExpectedValueResearch` (already configured). It reads both historical SQL tables in read-only mode, reuses the fast single-threaded session loader, and has **no trade-parameter optimization, extra CPU-core parallelism, or live orders**.
+
+**Four fixed experiments (all ET):**
+
+| Experiment | Opening range | Decision time | First eligible breakout |
+|---|---|---|---|
+| `ORB15_0945` | 09:30–09:44 | 09:45 | 09:45–10:59 |
+| `ORB15_WAIT5_0950` | 09:30–09:44 | 09:50 | 09:50–10:59 |
+| `ORB30_1000` | 09:30–09:59 | 10:00 | 10:00–10:59 |
+| `ORB30_WAIT5_1005` | 09:30–09:59 | 10:05 | 10:05–10:59 |
+
+An eligible signal is the **first high/low break of that completed opening range**. When waiting five minutes, a breakout that happened during the waiting interval **invalidates the day**; we do not count its subsequent retouch as the first breakout. Same-one-minute high-and-low breaks are ambiguous and excluded. Entries occur **at the following completed signal candle's next-minute OPEN**, not during the breakout candle.
+
+Every hypothetical trade uses the previously fixed **one ES contract, 10-point stop, 15-point target, $10 estimated round-trip cost and 12:00 ET closing exit**. Stop/target ties are **stop-first**; adverse stop gaps fill at the worse open. The model never learns an entry price, post-signal candle, stop/target outcome or post-entry price movement as a predictor. Trade outcomes are labels.
+
+**Model feature ablations, trained only on the earliest historical 60%:**
+
+- `BASE` — training expected (winsorized) net USD and training target-before-stop probability.
+- `CORE` — opening size, net direction, closing position, *completed* breakout candle direction, timing, extension/body/volume, and known premarket 04:00–09:29.
+- `SHAPE` — CORE plus **15 normalized opening price-path checkpoints**: all closes for a 15-minute window, every second close for a 30-minute window.
+- `SHAPE_EARLY15` (30-minute cohorts only) — SHAPE plus separate **first-15-minute** range, price location, and first/second-half drift features, isolating extra 15-minute context *within* a 30-minute observation.
+- `SHAPE_POST5` (five-minute delayed cohorts only) — SHAPE plus the actual **five fully completed candles immediately after** the opening window, including signed movement, range, expansion and volume. This is compared with the **same-day SHAPE model on the same delayed-entry candidates**.
+- `SHAPE_EARLY15_POST5` — for the 30-minute delayed cohort, combine the separate 15-minute context with the five minutes following the 30-minute opening range.
+
+Fixed **ridge-regularized linear EV** and **logistic target-probability** models train for 400 gradient iterations (step 0.18, L2 0.07), with no post-hoc hyperparameter or stop/target search. EV training labels are capped at **±$1,500** to limit outlier influence, but all **actual P&L/drawdown reports are uncapped**. Fit once on historical TRAIN 2020–2023; evaluate the later chronological VALIDATION 2023–2024, previously examined historical TEST 2024–2025, then the disjoint newer 2025–2026 source **with frozen models**.
+
+**What to inspect in console:**
+
+- `WINDOW_EV_COHORT`: eligible breakout samples, early/no/ambiguous breaks, target/trade-win counts, range widths, average net and descriptive 30-minute MFE/MAE.
+- `WINDOW_EV_MODEL`: model expected profit versus actual realized average net, MAE and RMSE (USD), prediction/realized-profit correlation, target-before-stop probability calibration (Brier).
+- `WINDOW_EV_COMPARE`: **identical-trade, same-time comparison** of models within a cohort. Positive MAE/RMSE/Brier gains mean the extra features helped. This is the primary test of whether 15-minute details or post-window behavior carry incremental signal.
+- `WINDOW_EV_FILTER`: unfiltered trade outcomes versus predicted-EV **above zero**, or above zero **and** exceeding a top-quartile cutoff determined *only on TRAIN predicted EV*. Prints coverage, P&L, drawdown, win rate, profit factor, and $20/$30 round-trip cost stress. **No trade** is valid when all predicted EVs are nonpositive.
+- `WINDOW_EV_BINS`: fixed predicted-expected-profit bands compared against actual profit and target frequency.
+- `WINDOW_EV_POST5`: causal pre-breakout buckets (opening direction **continues**, **reverses**, or five-minute movement **flat**), with actual later breakout results. Only available for eligible delayed-cohort examples.
+- `WINDOW_EV_PAIR15_30`: same-calendar-day 15-minute vs. 30-minute trade P&L as descriptive context; **not** identical trades, because range widths, first-break times, and entries differ.
+- `WINDOW_EV_YEAR`, `WINDOW_EV_TOTAL_SECONDS`: annual results and run time.
+
+**Interpretation:** The five-minute waiting rules create a **conditional subset** by excluding already-broken ranges; never compare total P&L across 15, 30, or delayed cohorts as though these were identical opportunities. Only **within-cohort** CORE vs. SHAPE vs. added early-15/post-5 models are matched predictive feature tests. MFE/MAE includes bars that can occur after the hypothetical stop exit and is descriptive, not trade profit. One-minute OHLC cannot guarantee fills. These older and recent test periods have already been examined by the project; they are **not pristine fresh confirmation**, and promising variants require untouched forward/paper-trading evidence. No external news, sector sentiment or future weekly returns are inputs yet.
+
+## Earlier: breakout-quality probability study (November 2026)
 
 Set `Backtest:Mode` to **`BreakoutQualityResearch`** (already the default in `appsettings.json`). Runs single-threaded in read-only mode on `dbo.MES_DATA_2020_2025` then `dbo.MES_DATA`. This study is deliberately **not a new optimizer**. It reuses the previous *fixed* 10-point ES stop, 15-point ES target, **one ES contract**, noon exit and $10 round-trip simulated costs. No orders or SQL writes.
 

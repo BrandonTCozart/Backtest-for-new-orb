@@ -1,6 +1,6 @@
 # ES Multi-Strategy Backtester + Original ORB Optimizer
 
-Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The **current default is `OpeningDirectionResearch`**, a fast, single-threaded, exploratory study of the first 15-minute price path and premarket direction. It does **not** optimize ORB strategies. It now includes one fixed, explicitly hypothetical breakout-fill diagnostic (not a live execution model), alongside its statistics. The earlier portfolio / ORB experiment modes remain available by changing `Backtest:Mode`. Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
+Open **`Backtest for new orb.slnx`** in Visual Studio and press **Play**. The **current default is `BreakoutQualityResearch`**, a fast, single-threaded experiment estimating the probability of a breakout reaching a fixed profit target before its stop-loss. It runs a fixed hypothetical next-open execution replay, not an ORB configuration sweep or a live trading system. The original `OpeningDirectionResearch` and previous modes remain separately selectable. The earlier portfolio / ORB experiment modes remain available by changing `Backtest:Mode`. Both SQL tables contain **ES** futures candles despite their legacy `MES` names. No live orders are placed and neither table is modified.
 
 
 ### Adaptive configurations and candle features (November 2026)
@@ -60,7 +60,48 @@ The **RegimeAware** portfolio router competes against the existing single, fixed
 
 Regime thresholds are selected exclusively from training history (small, disclosed 16-threshold grid, optionally with chronological fallbacks), with frozen choices evaluated on later OOS dates. The console reports `FOLD_REGIME_COMPARE` for each fold and `REPLAY_REGIME_COMPARE`, `REPLAY_REGIME_AUDIT`, `REPLAY_TOTAL,RegimeComparison`, plus weekly and yearly regime comparison rows in the later frozen evaluation. This reports a trained regime alternative even when another router wins the training selection. These improvements **change which sessions and contracts enter the backtest**: older performance numbers and previously frozen configuration IDs are **not directly comparable**, and real SQL re-optimization/replay is required. The synthetic suite tests future-volume roll avoidance, decision cutoffs, future-bar immunity, six regime states, and parallel/serial parity. No actual SQL outcomes have been measured by CI.
 
-## New: 15-minute line-shape and premarket directional research (current default)
+## Current default: breakout-quality probability study (November 2026)
+
+Set `Backtest:Mode` to **`BreakoutQualityResearch`** (already the default in `appsettings.json`). Runs single-threaded in read-only mode on `dbo.MES_DATA_2020_2025` then `dbo.MES_DATA`. This study is deliberately **not a new optimizer**. It reuses the previous *fixed* 10-point ES stop, 15-point ES target, **one ES contract**, noon exit and $10 round-trip simulated costs. No orders or SQL writes.
+
+**Research question:** Given everything knowable *by the end of the first unambiguous post-09:45 opening-range breakout candle*, what is the probability that a hypothetical entry at the **next one-minute bar's open** reaches its 15-point profit target **before** its 10-point stop? If the trade exits at noon before touching either, it counts as a **failure of the target-before-stop label**, even if its final net P&L is positive; separate P&L and realized win rate are always reported.
+
+**Causality contract (no cheating):**
+
+- First 15-minute opening range and its entire 15-close shape are known at 09:45 ET.
+- First breakout candle must finish from **09:45 through 10:59 ET**; a single bar crossing **both** boundaries is excluded as ambiguous; no breakout before 11:00 means no trade. Its body, high/low extension, volume, close relative to boundary and time since 09:45 become knowable only **after that candle has closed**.
+- Premarket input runs **04:00–09:29 ET**. If any premarket minute is missing, a missingness indicator is set and its movement contribution is neutral rather than inventing an actual 0-point overnight move.
+- Trade entry **occurs at the next minute's OPEN**, not during the breakout candle or at a retrospectively chosen touch price. The next opening price, stop/target touches, noon exit and P&L are **labels only**, never model inputs.
+- One-minute OHLC cannot order simultaneous stop/target touches. The simulator assumes the **stop first**, with adverse stop gaps filled at the worse open; favorable target gaps are capped at the fixed target price. Fixed exit models are imperfect execution proxies; no order book/slippage feed is available.
+
+**Chronological design:** Fit all logistic coefficients, prior probabilities, and trade-policy quantile thresholds on the **first 60% of complete historical RTH dates only**. Report training (in-sample), next 20% historical validation, final 20% historical previously examined test, then the disjoint 2025–2026 previously examined recent sample, **without any refitting**. All four model variants share the **exact same first-break signal events and trade labels**. This isolates predictive incremental value from changing the trade sample. The later test windows have previously been inspected in this project: **they are not pristine new out-of-sample evidence for the broader research program**.
+
+**Five training-frozen probability models, with predeclared regularization:**
+
+| Model | Information known before next-open entry |
+|---|---|
+| `BASE` | Constant target-before-stop rate observed on TRAIN |
+| `OPENING` | The 09:45 close's location in the range, opening net move, log range width |
+| `BREAKOUT` | OPENING plus completed breakout candle direction, timing, body, overshoot, price extension, volume ratio, bar range and close position |
+| `SHAPE_BREAKOUT` | BREAKOUT plus all fifteen 09:30–09:44 normalized closing prices |
+| `FULL_WITH_PRE4` | SHAPE_BREAKOUT plus premarket 04:00–09:29 price change and missingness indicator |
+
+Training uses a small, fixed **L2-regularized logistic regression** (550 iterations, step size 0.20, L2=0.035) for each non-baseline model. No hyperparameter search and no multicore parallelism. No fitted data beyond TRAIN. Rather than treating correlated bullish features as independent votes, the model learns fixed weights; new evidence must outperform the simpler models on later dates.
+
+**Reports and decisions:**
+
+- `QUALITY_SPLIT` — counts of complete sessions, first-break trades, no-break/ambiguous days and target/stop/noon exits.
+- `QUALITY_MODEL` — mean estimated success probability versus actual target-before-stop rate, **Brier score**, log loss, and Brier improvement over training-only constant-rate baseline. **Lower Brier/log loss is better.**
+- `QUALITY_COMPARE` — same-day Brier gains when upgrading from BASE → OPENING → BREAKOUT → SHAPE_BREAKOUT → FULL_WITH_PRE4. A negative gain means the added features hurt accuracy.
+- `QUALITY_CALIBRATION` — fixed bins of predicted probabilities, realized target-hit frequency and average realized P&L. Empty bins are retained.
+- `QUALITY_THRESHOLD` — exactly which trade-gate thresholds were frozen before evaluation. `TRAIN_TOP25` uses **only the 75th percentile of training model scores**, not any holdout quantile or profit optimization; additional 0.50 / 0.60 probability gates are fixed beforehand.
+- `QUALITY_FILTER` — **ALL_BREAKS** (no probability gate) versus training-frozen top-quarter gates on BREAKOUT, SHAPE_BREAKOUT and FULL, and FULL probability ≥0.50 / ≥0.60; report trades, conditional hit rate, win rate, net profit, drawdown, profit factor, costs at $20/$30, and exit distribution. **No-trade is a valid outcome** if no scores pass a gate.
+- `QUALITY_YEAR` — calendar breakdown for ALL_BREAKS and the frozen FULL top-quarter gate, to identify regime concentration.
+- `QUALITY_TOTAL_SECONDS` — total wall-clock runtime, including SQL.
+
+**Research safeguards:** The output is **not** evidence of a proven profitable bot. A high predicted probability of reaching the target may not yield positive expected value after realistic fills, stop losses, risk and costs. The 10/15-point stop/target are illustrative fixed parameters, *not* optimized or selected as a viable strategy. Individual threshold variants and models are reported for diagnosis; choosing the best-performing one from the already-seen tests would be data snooping. Any promising result requires an untouched chronological forward sample or paper trading before deployment.
+
+## New: 15-minute line-shape and premarket directional research (previous experiment)
 
 Set `Backtest:Mode` to `OpeningDirectionResearch` and optionally `Backtest:ShapePatternGroups` to **5** (allowed **2–8**). Pull latest `main`, launch in Release with the existing read-only SQL connection; this is an exploratory **probability/correlation study**, not a profitable-trading claim or ORB order execution.
 

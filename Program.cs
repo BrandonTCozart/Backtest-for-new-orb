@@ -56,6 +56,9 @@ try
         throw new ArgumentException(
             "Backtest:ShapePatternGroups must be between 2 and 8.");
     var mode = (configuration["Backtest:Mode"] ?? "HistoricalThenRecent").Trim().ToLowerInvariant();
+    if (mode is "breakoutqualityresearch" or "breakoutquality")
+        return await BreakoutQualityResearch.RunAsync(
+            configuration.GetConnectionString("MarketData"), symbol, timeZone);
     if (mode is "openingdirectionresearch" or "shapepremarketresearch")
         return await OpeningDirectionResearch.RunAsync(
             configuration.GetConnectionString("MarketData"), symbol,
@@ -108,7 +111,7 @@ try
         }
         default:
             throw new ArgumentException(
-                "Backtest:Mode must be HistoricalThenRecent, ResearchThenHistorical, Multi, HistoricalReplay, Orb, OrbPatternResearch, OrbGroup3Replay, OpeningDirectionResearch, or Both (appsettings.json).");
+                "Backtest:Mode must be HistoricalThenRecent, ResearchThenHistorical, Multi, HistoricalReplay, Orb, OrbPatternResearch, OrbGroup3Replay, OpeningDirectionResearch, BreakoutQualityResearch, or Both (appsettings.json).");
     }
 }
 catch (Exception error)

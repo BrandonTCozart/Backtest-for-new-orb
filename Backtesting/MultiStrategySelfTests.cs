@@ -166,6 +166,7 @@ public static class MultiStrategySelfTests
             TestOrbResearchProgress();
             TestOpeningDirectionResearch(date);
             TestOpeningBreakoutValidation(date);
+            TestBreakoutQualityResearch(date);
             Ensure(OrbGroup3ReplayRunner.FrozenVariant ==
                 (deepVariants.Single(x => x.Id == 14051) with {
                     SignalMode = SignalMode.Reversed
@@ -836,6 +837,133 @@ public static class MultiStrategySelfTests
             "then show conservative trade outcomes on later periods.");
         Console.WriteLine("PASS: frozen nearest/compact/shape baselines and next-open " +
             "breakout execution (including gap and same-minute stop-first) checks.");
+    }
+
+    private static void TestBreakoutQualityResearch(DateOnly date)
+    {
+        var raw = CreateFullSession(date).OrderBy(x => x.T).ToArray();
+        var row = OpeningDirectionResearch.Extract(raw).Single();
+        var high = row.OpeningHigh;
+        var rth = (PriceBar[])row.Rth.Clone();
+        // First post-opening breakout at 09:45, observed at minute's END.
+        var c = rth[15].C;
+        rth[15] = rth[15] with {
+            C = new Candle {
+                T = c.T, O = high - 1m, H = high + 2m,
+                L = high - 2m, C = high + 1m, V = c.V
+            }
+        };
+        var next = rth[16].C;
+        rth[16] = rth[16] with {
+            C = new Candle {
+                T = next.T, O = high + 1m,
+                H = high + 18m, L = high - 11m,
+                C = high + 1m, V = next.V
+            }
+        };
+        var setup = row with {
+            FirstBreakBy11 = OpeningDirectionResearch.Outcome.Up,
+            FirstBreakBarIndex = 15,
+            Rth = rth
+        };
+        var original = BreakoutQualityResearch.Observe(setup)!;
+        Ensure(original.Features.Length == 28 &&
+               original.SignalBarTime == rth[15].T &&
+               original.Fill.EntryAt == rth[16].T &&
+               !original.HitTarget && original.Fill.Net == -510m,
+            "Quality label must use next-open stop-first trade, " +
+            "not an assumed fill on breakout signal candle.");
+
+        // Mutate NEXT bar: predictions must not change when future P&L changes.
+        var wins = (PriceBar[])rth.Clone();
+        var post = wins[16].C;
+        wins[16] = wins[16] with {
+            C = new Candle {
+                T = post.T, O = high + 1m,
+                H = high + 18m, L = high - 1m,
+                C = high + 16m, V = post.V
+            }
+        };
+        var changed = BreakoutQualityResearch.Observe(setup with { Rth = wins })!;
+        Ensure(changed.HitTarget && changed.Fill.Net == 740m &&
+               original.Features.SequenceEqual(changed.Features),
+            "Changing post-entry candles can alter the outcome " +
+            "but never the breakout-time features.");
+
+        // Mutate ONLY the already-completed breakout candle: observed features
+        // SHOULD change; no price after the decision has been consulted.
+        var signalChange = (PriceBar[])rth.Clone();
+        var signal = signalChange[15].C;
+        signalChange[15] = signalChange[15] with {
+            C = new Candle {
+                T = signal.T, O = signal.O, H = signal.H,
+                L = signal.L, C = signal.C, V = signal.V * 6
+            }
+        };
+        var revised = BreakoutQualityResearch.Observe(
+            setup with { Rth = signalChange })!;
+        Ensure(!original.Features.SequenceEqual(revised.Features),
+            "Volume from the completed signal candle must influence " +
+            "quality assessment, unlike future bar volume.");
+
+        Ensure(BreakoutQualityResearch.Observe(setup with {
+            FirstBreakBy11 = OpeningDirectionResearch.Outcome.Ambiguous
+        }) is null, "Two-sided ambiguous breaks must have no quality forecast.");
+
+        // Fit on synthetic examples only; later labels can never change
+        // pre-frozen scores or a training-derived 75th-percentile cutoff.
+        var sample = Enumerable.Range(0, 100).Select(i => {
+            var y = i % 3 == 0;
+            var features = (double[])original.Features.Clone();
+            features[0] = (i % 4 - 1.5) / 2;
+            features[2] = (i % 7 - 3) / 4.0;
+            features[7] = (i % 5) / 10.0;
+            features[11] = (i % 2 == 0 ? 1.0 : -1.0);
+            features[26] = (i % 5 - 2) / 3.0;
+            return original with {
+                Day = date.AddDays(i),
+                Features = features,
+                Fill = y ? changed.Fill : original.Fill,
+                HitTarget = y
+            };
+        }).ToArray();
+        var fitted = BreakoutQualityResearch.Frozen.Fit(sample[..60]);
+        var after = sample[92];
+        var changedLabel = after with {
+            HitTarget = !after.HitTarget,
+            Fill = changed.Fill with { Net = 900m }
+        };
+        foreach (var method in new[] {
+            "BASE", "OPENING", "BREAKOUT", "SHAPE_BREAKOUT", "FULL_WITH_PRE4"
+        })
+            Ensure(fitted.Probability(after, method) ==
+                   fitted.Probability(changedLabel, method),
+                "Forecast must not use evaluation labels, exits or P&L.");
+        Ensure(fitted.QuartileCutoff("FULL_WITH_PRE4") is > 0 and < 1 &&
+               BreakoutQualityResearch.Take(after, fitted, "ALL_BREAKS"),
+            "Train-only ranking cutoff must be finite and no-trade is optional.");
+
+        using var output = new StringWriter();
+        var historical = Enumerable.Range(0, 100)
+            .Select(i => setup with {
+                Day = date.AddDays(i),
+                Rth = i % 3 == 0 ? wins : rth
+            }).ToArray();
+        var recent = historical.Take(20).Select(x =>
+            x with { Day = x.Day.AddYears(1) }).ToArray();
+        BreakoutQualityResearch.Report(historical, recent, output);
+        var text = output.ToString();
+        Ensure(text.Contains("QUALITY_MODEL,VALIDATION,FULL_WITH_PRE4,") &&
+               text.Contains("QUALITY_MODEL,RECENT_ALREADY_SEEN,BASE,") &&
+               text.Contains("QUALITY_COMPARE,") &&
+               text.Contains("QUALITY_THRESHOLD,") &&
+               text.Contains("QUALITY_FILTER,RECENT_ALREADY_SEEN,ALL_BREAKS,") &&
+               text.Contains("QUALITY_CALIBRATION,") &&
+               text.Contains("QUALITY_RESEARCH_COMPLETE"),
+            "Quality research must include train-frozen baselines, " +
+            "conditional calibration, trade filters and period summaries.");
+        Console.WriteLine("PASS: breakout-quality target-before-stop causality, " +
+            "frozen probabilities, training-only thresholds and cost report.");
     }
 
     private static void TestFrozenOrbGroup3Replay()
